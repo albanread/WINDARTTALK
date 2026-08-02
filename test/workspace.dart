@@ -396,11 +396,67 @@ void spawnLanguage() {
     if (_lang == null && msg is SendPort) {
       _lang = msg;
       print('LANG: bilingual language isolate up');
+      _loadStWorld();   // C2: import the ST world so its classes are browsable
     } else if (msg is List && msg.isNotEmpty && msg[0] == 'tr') {
       wsLog.writeln(msg[1].toString()); // Smalltalk Transcript -> Output pane
     }
   });
   Isolate.spawnUri(scratch.uri, <String>[scratch.path, '', '', ''], rp.sendPort);
+}
+
+// ── C2: browse the Smalltalk world. On boot the world is imported into the
+// language isolate; its classes appear under a "smalltalk" library in the
+// Browser, and selecting one fetches its real .mst source + method list over
+// the wire (dart:mirrors can't see ST classes — they have no TokenStream).
+Set<String> _stClasses = new Set<String>();
+bool _stWorldLoaded = false;
+const String _stWorldDir = r'e:\windart-talk\MACDARTV1\macdart\st\world';
+
+void _loadStWorld() {
+  if (_stWorldLoaded || _lang == null) return;
+  _stWorldLoaded = true;
+  ask('stimport', _stWorldDir).then((imp) {
+    print('ST-WORLD: ' + imp.toString());
+    ask('classes', '').then((raw) {
+      var names =
+          (raw is List) ? raw.map((e) => e.toString()).toList() : <String>[];
+      names.sort();
+      _stClasses = new Set<String>.from(names);
+      if (!libraryNames.contains('smalltalk')) libraryNames.insert(0, 'smalltalk');
+      classesInLib['smalltalk'] = names;
+      for (var n in names) libOfClass[n] = 'smalltalk';
+      print('ST-WORLD: ' + names.length.toString() + ' Smalltalk classes browsable');
+      if (ui.ticketOf('br_libs') != null) {
+        ui.set('br_libl', {'text': 'Libraries (${libraryNames.length})'});
+        ui.set('br_libs', {'rows': libraryNames.length});
+        ui.commit();
+      }
+    });
+  });
+}
+
+// Browse a Smalltalk class: members + real source come from the language
+// isolate over the wire (async), not from dart:mirrors.
+Future _browseStClass(String cls) async {
+  currentLib = 'smalltalk';
+  libClasses = classesInLib['smalltalk'] ?? <String>[];
+  currentClass = cls;
+  ui.set('br_ll', {'text': 'Classes (${libClasses.length})'});
+  ui.set('br_classes', {'rows': libClasses.length});
+  ui.set('br_source', {'text': '"loading ' + cls + ' ..."'});
+  ui.commit();
+  var mems = await ask('members', cls);
+  brVars = <String>[];
+  brMethods = (mems is List) ? mems.map((e) => e.toString()).toList() : <String>[];
+  brMethods.sort();
+  ui.set('br_vl', {'text': 'Variables - instance (0)'});
+  ui.set('br_ml', {'text': 'Methods - instance (${brMethods.length})'});
+  ui.set('br_vars', {'rows': 0});
+  ui.set('br_meths', {'rows': brMethods.length});
+  var src = await ask('classsrc', cls);
+  ui.set('br_source', {'text': wr(src.toString())});
+  ui.commit();
+  print('BROWSE ST: ' + cls + ' (' + brMethods.length.toString() + ' methods)');
 }
 
 void doIt() {
@@ -448,6 +504,15 @@ Future<String> handle(String line) async {
     case 'editor':
       var s = ui.editorSelection('ws_editor');
       return s.length > 2 ? s[2].toString() : '';
+    case 'browse':
+      switchTab(1);
+      var c = arg.trim();
+      if (_stClasses.contains(c)) {
+        await _browseStClass(c);
+        return 'browsed ST ' + c;
+      }
+      browseToClass(c);
+      return 'browsed ' + c;
     case 'doit':
       if (_lang == null) return '(language isolate not ready)';
       return (await ask('doit', arg)).toString();
@@ -614,6 +679,7 @@ void selectLibClass(int r) {
 // methods, show its declaration. The shared entry point for the Classes pane,
 // Find jumps, and toolbar Back/Forward/Home.
 void browseToClass(String cls) {
+  if (_stClasses.contains(cls)) { _browseStClass(cls); return; }
   var lib = libOfClass[cls];
   if (lib != null && (lib != currentLib || libClasses.isEmpty)) {
     currentLib = lib;
