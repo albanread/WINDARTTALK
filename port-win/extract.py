@@ -26,8 +26,9 @@ import sys
 # --- Fixed locations (this is a Windows-only, path-pinned port) --------------
 HERE = os.path.dirname(os.path.abspath(__file__))          # e:\windart\port-win
 SRC = r"e:\dart_origins\sdk-1.24.3"                        # reference quarry (RO)
-DEST = r"e:\windart\tree"                                   # owned Windows tree
+DEST = r"e:\windart-talk\tree"                              # owned Windows tree (bilingual ST fork)
 PATCH = os.path.join(HERE, "windart-port.patch")           # optional (see below)
+ST_PATCH = os.path.join(HERE, "st-tree.patch")             # WINDART-TALK: ST front-end tree hunks
 
 # Test/junk excludes applied to every runtime subtree copy (fnmatch on basename).
 COMMON_EXCLUDES = ("*_test.cc", "*_test.h", "*_test_*.cc", ".git")
@@ -116,6 +117,15 @@ def apply_windart_patch() -> None:
     with open(PATCH, 'rb') as fh:
         subprocess.run([patch_exe, '-p1', '-d', DEST], stdin=fh, check=True)
     log(f'applied windart-port.patch (13 files) via {os.path.basename(patch_exe)}')
+    # WINDART-TALK: then the Smalltalk front-end's VM-tree hunks — dart:cocoa
+    # embedder registration (parallel to dart:win) + the compiler/inliner
+    # st::BuildGraph routing hooks + the 3 noSuchMethod patches. LF-normalized
+    # like windart-port.patch. The dart_st C++/Dart sources live in
+    # port-win/dart_st/ (a tracked static lib, NOT in the regenerated tree).
+    if os.path.isfile(ST_PATCH):
+        with open(ST_PATCH, 'rb') as fh:
+            subprocess.run([patch_exe, '-p1', '-d', DEST], stdin=fh, check=True)
+        log('applied st-tree.patch (12 files: dart:cocoa embedder + ST hooks + NSM)')
 
 
 def count_ext(root_rel: str, ext: str) -> int:

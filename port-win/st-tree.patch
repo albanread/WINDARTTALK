@@ -1,0 +1,307 @@
+# WINDART-TALK Smalltalk front-end — tree hunks (dart:cocoa embedder reg +
+# ST-VM hooks + noSuchMethod patches). Applied by extract.py AFTER
+# windart-port.patch (LF-normalized, like that patch). object.cc (debugger
+# source-map) + the --with-st CLI hook are deferred.
+--- a/runtime/bin/builtin.h
++++ b/runtime/bin/builtin.h
+@@ -30,7 +30,8 @@
+     kInvalidLibrary = -1,
+     kBuiltinLibrary = 0,
+     kIOLibrary,
+-    kWinLibrary  // WINDART: dart:win native bridge
++    kWinLibrary,  // WINDART: dart:win native bridge
++    kCocoaLibrary  // WINDART: dart:cocoa — the Smalltalk front-end
+   };
+ 
+   // Get source corresponding to built in library specified in 'id'.
+@@ -72,6 +73,7 @@
+   static const char* io_source_paths_[];
+   static const char* io_patch_paths_[];
+   static const char* win_source_paths_[];  // WINDART: dart:win
++  static const char* cocoa_source_paths_[];  // WINDART: dart:cocoa
+   static const char* html_source_paths_[];
+   static const char* html_common_source_paths_[];
+   static const char* js_source_paths_[];
+--- a/runtime/bin/builtin.cc
++++ b/runtime/bin/builtin.cc
+@@ -22,6 +22,8 @@
+     // Unconditional (linked into every binary that pulls dart_win32), as
+     // dart:cocoa was on the mac side.
+     {DartUtils::kWinLibURL, win_source_paths_, NULL, NULL, true},
++    // WINDART: dart:cocoa — the Smalltalk front-end. Index 3 == kCocoaLibrary.
++    {DartUtils::kCocoaLibURL, cocoa_source_paths_, NULL, NULL, true},
+ 
+ #if defined(DART_NO_SNAPSHOT)
+     // Only include these libraries in the dart_bootstrap case for now.
+--- a/runtime/bin/builtin_nolib.cc
++++ b/runtime/bin/builtin_nolib.cc
+@@ -19,6 +19,8 @@
+     {DartUtils::kIOLibURL, NULL, NULL, NULL, true},
+     // WINDART: dart:win (source from the snapshot; natives resolved here).
+     {DartUtils::kWinLibURL, NULL, NULL, NULL, true},
++    // WINDART: dart:cocoa (source from the snapshot; natives resolved here).
++    {DartUtils::kCocoaLibURL, NULL, NULL, NULL, true},
+ 
+     // End marker.
+     {NULL, NULL, NULL, NULL, false}};
+--- a/runtime/bin/builtin_natives.cc
++++ b/runtime/bin/builtin_natives.cc
+@@ -17,6 +17,7 @@
+ #include "bin/file.h"
+ #include "bin/io_natives.h"
+ #include "win_natives.h"  // WINDART: dart:win native resolver
++#include "cocoa_natives.h"  // WINDART: dart:cocoa (Smalltalk) native resolver
+ #include "bin/platform.h"
+ 
+ namespace dart {
+@@ -72,6 +73,10 @@
+     result = WinNativeLookup(name, argument_count, auto_setup_scope);
+   }
+   if (result == NULL) {
++    // WINDART: then the dart:cocoa (Smalltalk) natives.
++    result = CocoaNativeLookup(name, argument_count, auto_setup_scope);
++  }
++  if (result == NULL) {
+     result = Builtin_DummyNative;
+   }
+   return result;
+@@ -88,7 +93,9 @@
+   }
+   const uint8_t* io_sym = IONativeSymbol(nf);
+   if (io_sym != NULL) return io_sym;
+-  return WinNativeSymbol(nf);  // WINDART
++  const uint8_t* win_sym = WinNativeSymbol(nf);  // WINDART
++  if (win_sym != NULL) return win_sym;
++  return CocoaNativeSymbol(nf);  // WINDART: dart:cocoa
+ }
+ 
+ 
+--- a/runtime/bin/dartutils.h
++++ b/runtime/bin/dartutils.h
+@@ -246,6 +246,7 @@
+   static const char* const kIOLibURL;
+   static const char* const kIOLibPatchURL;
+   static const char* const kWinLibURL;  // WINDART: dart:win
++  static const char* const kCocoaLibURL;  // WINDART: dart:cocoa
+   static const char* const kUriLibURL;
+   static const char* const kHttpScheme;
+   static const char* const kVMServiceLibURL;
+--- a/runtime/bin/dartutils.cc
++++ b/runtime/bin/dartutils.cc
+@@ -44,6 +44,7 @@
+ const char* const DartUtils::kIOLibURL = "dart:io";
+ const char* const DartUtils::kIOLibPatchURL = "dart:io-patch";
+ const char* const DartUtils::kWinLibURL = "dart:win";  // WINDART
++const char* const DartUtils::kCocoaLibURL = "dart:cocoa";  // WINDART
+ const char* const DartUtils::kUriLibURL = "dart:uri";
+ const char* const DartUtils::kHttpScheme = "http:";
+ const char* const DartUtils::kVMServiceLibURL = "dart:vmservice";
+@@ -699,6 +700,10 @@
+   Dart_Handle win_lib = Builtin::LoadAndCheckLibrary(Builtin::kWinLibrary);
+   RETURN_IF_ERROR(win_lib);
+   Builtin::SetNativeResolver(Builtin::kWinLibrary);
++  // WINDART: dart:cocoa — the Smalltalk front-end, same treatment.
++  Dart_Handle cocoa_lib = Builtin::LoadAndCheckLibrary(Builtin::kCocoaLibrary);
++  RETURN_IF_ERROR(cocoa_lib);
++  Builtin::SetNativeResolver(Builtin::kCocoaLibrary);
+ 
+   // Setup the builtin library in a persistent handle attached the isolate
+   // specific data as we seem to lookup and use builtin lib a lot.
+--- a/runtime/bin/gen_snapshot.cc
++++ b/runtime/bin/gen_snapshot.cc
+@@ -1370,6 +1370,9 @@
+   // WINDART: load dart:win into the snapshot isolate so it is captured too.
+   Dart_Handle win_lib = LoadGenericSnapshotCreationScript(Builtin::kWinLibrary);
+   CHECK_RESULT(win_lib);
++  // WINDART: dart:cocoa (Smalltalk front-end) — captured into the snapshot too.
++  Dart_Handle cocoa_lib = LoadGenericSnapshotCreationScript(Builtin::kCocoaLibrary);
++  CHECK_RESULT(cocoa_lib);
+   Dart_Handle result = Dart_FinalizeLoading(false);
+   if (Dart_IsError(result)) {
+     const char* err_msg = Dart_GetError(library);
+--- a/runtime/vm/compiler.cc
++++ b/runtime/vm/compiler.cc
+@@ -45,6 +45,18 @@
+ #include "vm/timeline.h"
+ #include "vm/timer.h"
+ 
++// WINDART/ST: the Smalltalk (.mst) IL builder (dart_st/st_flow_graph_builder.cc).
++// ST-marked functions (a non-NULL kernel_function_ slot reused as an st::Node
++// marker) route here instead of the dormant kernel builder — see BuildFlowGraph.
++namespace st {
++::dart::FlowGraph* BuildGraph(
++    ::dart::ParsedFunction*,
++    const ::dart::ZoneGrowableArray<const ::dart::ICData*>&,
++    intptr_t);
++// Scope-only prep for the ST var-descriptor path (ComputeLocalVarDescriptors).
++void PrepareScopes(::dart::ParsedFunction*);
++}  // namespace st
++
+ namespace dart {
+ 
+ DEFINE_FLAG(bool,
+@@ -135,6 +147,12 @@
+     const ZoneGrowableArray<const ICData*>& ic_data_array,
+     intptr_t osr_id) {
+   if (UseKernelFrontEndFor(parsed_function)) {
++    // WINDART/ST: an ST-marked function carries a non-NULL kernel_function_ slot
++    // (reused as the Smalltalk marker). The noSuchMethod / invokeField dispatcher
++    // kinds also reach here but with a NULL marker and stay on the kernel builder.
++    if (parsed_function->function().kernel_function() != NULL) {
++      return st::BuildGraph(parsed_function, ic_data_array, osr_id);
++    }
+     kernel::TreeNode* node = static_cast<kernel::TreeNode*>(
+         parsed_function->function().kernel_function());
+     kernel::FlowGraphBuilder builder(node, parsed_function, ic_data_array, NULL,
+@@ -369,6 +387,28 @@
+   if (cls.is_marked_for_parsing()) {
+     return Error::null();
+   }
++  // WINDART/ST: an ST class (st:mst / st:prelude library) has NO Dart source —
++  // routing it to the Parser segvs (no TokenStream). Reached via the debugger's
++  // FindBestFit -> EnsureIsFinalized. Finalize it directly, like a typedef class.
++  {
++    const Library& lib = Library::Handle(cls.library());
++    if (!lib.IsNull()) {
++      const String& url = String::Handle(lib.url());
++      if (url.StartsWith(String::Handle(String::New("st:")))) {
++        LongJumpScope jump;
++        if (setjmp(*jump.Set()) == 0) {
++          ClassFinalizer::FinalizeClass(cls);
++          return Error::null();
++        } else {
++          Thread* thread = Thread::Current();
++          Error& error = Error::Handle(thread->zone());
++          error = thread->sticky_error();
++          thread->clear_sticky_error();
++          return error.raw();
++        }
++      }
++    }
++  }
+   // If the class is a typedef class there is no need to try and
+   // compile it. Just finalize it directly.
+   if (cls.IsTypedefClass()) {
+@@ -1593,7 +1633,9 @@
+       Parser::ParseFunction(parsed_function);
+       parsed_function->AllocateVariables();
+     } else {
+-      parsed_function->EnsureKernelScopes();
++      // WINDART/ST: the marker is an st::Node (V1 has no real kernel), so the
++      // kernel ScopeBuilder would segv on it. Route to the ST scope builder.
++      ::st::PrepareScopes(parsed_function);
+     }
+     const LocalVarDescriptors& var_descs = LocalVarDescriptors::Handle(
+         parsed_function->node_sequence()->scope()->GetVarDescriptors(function));
+--- a/runtime/vm/flow_graph_inliner.cc
++++ b/runtime/vm/flow_graph_inliner.cc
+@@ -23,6 +23,16 @@
+ #include "vm/object_store.h"
+ #include "vm/timer.h"
+ 
++namespace st {
++// WINDART/ST inlining: build an ST callee graph with the inliner's exit
++// collector + block-id offset (mirrors the compiler.cc BuildFlowGraph hook,
++// extended for inlining). Without this an ST callee misreads the st::Node marker.
++::dart::FlowGraph* BuildGraph(::dart::ParsedFunction*,
++                              const ::dart::ZoneGrowableArray<
++                                  const ::dart::ICData*>&,
++                              ::dart::InlineExitCollector*, intptr_t);
++}  // namespace st
++
+ namespace dart {
+ 
+ DEFINE_FLAG(int,
+@@ -796,13 +806,21 @@
+             new (Z) InlineExitCollector(caller_graph_, call);
+         FlowGraph* callee_graph;
+         if (UseKernelFrontEndFor(parsed_function)) {
+-          kernel::TreeNode* node = static_cast<kernel::TreeNode*>(
+-              parsed_function->function().kernel_function());
+-
+-          kernel::FlowGraphBuilder builder(
+-              node, parsed_function, *ic_data_array, exit_collector,
+-              Compiler::kNoOSRDeoptId, caller_graph_->max_block_id() + 1);
+-          {
++          // WINDART/ST: an ST method carries a NON-NULL marker (an st::Node) and
++          // builds through the ST inliner path. The noSuchMethod/invokeField
++          // dispatcher kinds also reach here but with a NULL marker — they stay
++          // on the kernel FlowGraphBuilder (which handles a NULL node).
++          if (parsed_function->function().kernel_function() != NULL) {
++            CSTAT_TIMER_SCOPE(thread(), graphinliner_build_timer);
++            callee_graph = ::st::BuildGraph(
++                parsed_function, *ic_data_array, exit_collector,
++                caller_graph_->max_block_id() + 1);
++          } else {
++            kernel::TreeNode* node = static_cast<kernel::TreeNode*>(
++                parsed_function->function().kernel_function());
++            kernel::FlowGraphBuilder builder(
++                node, parsed_function, *ic_data_array, exit_collector,
++                Compiler::kNoOSRDeoptId, caller_graph_->max_block_id() + 1);
+             CSTAT_TIMER_SCOPE(thread(), graphinliner_build_timer);
+             callee_graph = builder.BuildGraph();
+           }
+--- a/runtime/lib/internal_patch.dart
++++ b/runtime/lib/internal_patch.dart
+@@ -13,6 +13,15 @@
+     native "Internal_makeFixedListUnmodifiable";
+ 
+ class VMLibraryHooks {
++  // WINDART/ST front-end: tried by _Type.noSuchMethod so a Smalltalk class VALUE
++  // held in a variable is a first-class receiver. Set by dart:cocoa;
++  // (type, String selector, List args) -> [result] | null.
++  static var stTypeNSM;
++
++  // WINDART/ST front-end: tried by Object.noSuchMethod so the world image's
++  // core-class extensions (Integer>>fib, ...) dispatch on Dart native receivers.
++  static var stObjNSM;
++
+   // Example: "dart:isolate _Timer._factory"
+   static var timerFactory;
+ 
+--- a/runtime/lib/type_patch.dart
++++ b/runtime/lib/type_patch.dart
+@@ -10,7 +10,21 @@
+ }
+ 
+ // Equivalent of RawType.
+-class _Type extends _AbstractType {}
++class _Type extends _AbstractType {
++  // WINDART/ST front-end: a Smalltalk class VALUE is a Type, so a send to one
++  // held in a variable (`benchClass runOne`) IC-misses to here. The hook — set
++  // by dart:cocoa when the ST runtime initializes — tries class-side dispatch on
++  // the metaclass shadow chain and answers [result], or null for a genuine miss.
++  noSuchMethod(Invocation inv) {
++    var hook = internal.VMLibraryHooks.stTypeNSM;
++    if (hook != null && inv.isMethod && inv.namedArguments.isEmpty) {
++      var r = hook(this, internal.Symbol.getName(inv.memberName),
++                   inv.positionalArguments);
++      if (r != null) return r[0];
++    }
++    return super.noSuchMethod(inv);
++  }
++}
+ 
+ // Equivalent of RawTypeRef.
+ class _TypeRef extends _AbstractType {}
+--- a/runtime/lib/object_patch.dart
++++ b/runtime/lib/object_patch.dart
+@@ -44,6 +44,18 @@
+ 
+   @patch
+   dynamic noSuchMethod(Invocation invocation) {
++    // WINDART/ST front-end: the world image extends core classes whose instances
++    // here are Dart natives — a genuine miss first tries the ST extension-holder
++    // chain for the receiver's kind. Hook set by dart:cocoa; [result] on a hit,
++    // null on a miss (then the normal NSM error proceeds). Zero cost until a miss.
++    var stHook = internal.VMLibraryHooks.stObjNSM;
++    if (stHook != null &&
++        invocation.isMethod &&
++        invocation.namedArguments.isEmpty) {
++      var r = stHook(this, internal.Symbol.getName(invocation.memberName),
++          invocation.positionalArguments);
++      if (r != null) return r[0];
++    }
+     return _noSuchMethod(
+         invocation.isMethod,
+         internal.Symbol.getName(invocation.memberName),

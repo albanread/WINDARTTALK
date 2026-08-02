@@ -32,7 +32,7 @@ endif()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(WINDART_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
-set(TREE   e:/windart/tree)                 # extracted + (S1: pristine) source tree
+set(TREE   e:/windart-talk/tree)            # extracted + (S1: pristine) source tree
 set(RT     ${TREE}/runtime)
 set(SDKLIB ${TREE}/sdk/lib)
 set(PORT   ${WINDART_ROOT})                 # generators live beside this file
@@ -84,8 +84,9 @@ add_compile_definitions(
 )
 
 set(WIN32DIR ${WINDART_ROOT}/dart_win32)   # S4 dart:win host/natives/materializer
+set(STDIR    ${WINDART_ROOT}/dart_st)      # dart:cocoa — Smalltalk front-end (bilingual VM)
 include_directories(${RT} ${RT}/include ${DC} ${RT}/third_party
-                    ${RT}/third_party/sqlite ${WIN32DIR})
+                    ${RT}/third_party/sqlite ${WIN32DIR} ${STDIR})
 
 # --- MSVC compile options --------------------------------------------------
 # /bigobj          : many Dart TUs blow past the 2^16 section limit (mandatory).
@@ -329,7 +330,7 @@ add_executable(dart_bootstrap
 target_compile_definitions(dart_bootstrap PRIVATE DART_NO_SNAPSHOT)
 set_source_files_properties(${RT}/bin/main.cc TARGET_DIRECTORY dart_bootstrap
   PROPERTIES COMPILE_DEFINITIONS DART_PRECOMPILER)
-target_link_libraries(dart_bootstrap PRIVATE dart_io dart_builtin dart_engine_nosnap dart_win32 ${WIN_SYS_LIBS})
+target_link_libraries(dart_bootstrap PRIVATE dart_io dart_builtin dart_engine_nosnap dart_win32 dart_st ${WIN_SYS_LIBS})
 
 # --- gen_snapshot: emits the core VM + isolate snapshots --------------------
 # Uses gen_snapshot.cc (not main.cc) + builtin_gen_snapshot.cc (minimal native
@@ -340,7 +341,7 @@ add_executable(gen_snapshot
   ${PORT}/windart_browser_stubs.cc
   ${GEN}/builtin_gen.cc ${GEN}/io_gen.cc ${GEN}/io_patch_gen.cc ${GEN}/resources_gen.cc)
 target_compile_definitions(gen_snapshot PRIVATE DART_NO_SNAPSHOT PLATFORM_DISABLE_SOCKET)
-target_link_libraries(gen_snapshot PRIVATE dart_io dart_builtin dart_engine_nosnap dart_win32 ${WIN_SYS_LIBS})
+target_link_libraries(gen_snapshot PRIVATE dart_io dart_builtin dart_engine_nosnap dart_win32 dart_st ${WIN_SYS_LIBS})
 
 # --- Snapshot pipeline: gen_snapshot -> .bin -> snapshot_gen.cc -------------
 add_custom_command(
@@ -371,7 +372,7 @@ add_executable(dart
   ${GEN}/snapshot_gen.cc ${GEN}/resources_gen.cc)
 set_source_files_properties(${RT}/bin/main.cc TARGET_DIRECTORY dart
   PROPERTIES COMPILE_DEFINITIONS DART_PRECOMPILER)
-target_link_libraries(dart PRIVATE dart_io dart_builtin dart_engine_snap dart_win32 ${WIN_SYS_LIBS})
+target_link_libraries(dart PRIVATE dart_io dart_builtin dart_engine_snap dart_win32 dart_st ${WIN_SYS_LIBS})
 
 # ===========================================================================
 # S4: dart_win32 (Win32 GUI host + dart:win view-server) + dartui.exe
@@ -412,6 +413,24 @@ target_link_libraries(dart_win32 PUBLIC
   comctl32 d2d1 dwrite windowscodecs ole32 uxtheme user32 gdi32
   d3d11 dxgi d3dcompiler xaudio2)   # S6/T3 game pane (D3D11 + live present + XAudio2 SFX)
 
+# ===========================================================================
+# dart_st: the Smalltalk front-end (dart:cocoa)  ->  bilingual Dart + ST VM
+# ===========================================================================
+# The ST compiler (lexer/parser/loader/flow-graph-builder) + runtime natives
+# compile to a static lib, and cocoa.dart is embedded as the "dart:cocoa"
+# library exactly like dart:win / dart:io (dart_gen_builtin). dart:cocoa is
+# registered UNCONDITIONALLY in the embedder (builtin.cc/dartutils.cc dart:cocoa
+# hunks), so dart_st is linked into EVERY binary that links the bin layer.
+dart_gen_builtin(cocoa_gen.cc dart::bin::Builtin::cocoa_source_paths_ dart:cocoa ${STDIR}/cocoa.dart)
+add_library(dart_st STATIC
+  ${STDIR}/st_lexer.cc               # .mst -> tokens
+  ${STDIR}/st_parser.cc              # tokens -> ST AST
+  ${STDIR}/st_loader.cc              # AST -> live VM classes/methods/fields (kernel marker)
+  ${STDIR}/st_flow_graph_builder.cc  # ST method AST -> Dart flow-graph IR (the compiler)
+  ${STDIR}/st_natives.cc             # ST_* VM-API natives (reflection/become/FFI floor)
+  ${STDIR}/cocoa_natives.cc          # CocoaNativeLookup: name+argc -> ST_* resolver
+  ${GEN}/cocoa_gen.cc)               # dart:cocoa library source array
+
 # dartui: the GUI host. dart.exe's recipe + DART_UI_HOST (main.cc runs the Win32
 # pump instead of Dart_RunLoop) + dart_win32. Snapshot-based like dart.exe; the
 # snapshot already carries dart:win (gen_snapshot loads it). main.cc also gets
@@ -428,7 +447,7 @@ target_compile_definitions(dartui PRIVATE DART_UI_HOST)
 target_link_options(dartui PRIVATE /MANIFEST:NO)
 set_source_files_properties(${RT}/bin/main.cc TARGET_DIRECTORY dartui
   PROPERTIES COMPILE_DEFINITIONS DART_PRECOMPILER)
-target_link_libraries(dartui PRIVATE dart_io dart_builtin dart_engine_snap dart_win32 ${WIN_SYS_LIBS})
+target_link_libraries(dartui PRIVATE dart_io dart_builtin dart_engine_snap dart_win32 dart_st ${WIN_SYS_LIBS})
 # Stage 2: place the core snapshot .bin next to dartui.exe so it can boot from
 # disk (windart_load_snapshots_from_disk) and be swapped without a relink.
 add_custom_command(TARGET dartui POST_BUILD

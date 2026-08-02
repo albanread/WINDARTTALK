@@ -20,8 +20,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $VcVars = "C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars64.bat"
-$SrcDir = "e:\windart\port-win"
-$BuildDir = "e:\windart\build"
+$SrcDir = "e:\windart-talk\port-win"
+$BuildDir = "e:\windart-talk\build"
 $LogFile = Join-Path $BuildDir "build.log"
 
 if (-not (Test-Path $VcVars)) {
