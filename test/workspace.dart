@@ -370,15 +370,51 @@ void buildWorkspace() {
   ui.set('ws_output', {'text': wr(wsLog.toString())});
 }
 
+// ── C1: bilingual Do It. The Smalltalk/Dart LANGUAGE isolate (workspace/
+// language.dart — MACDART's bilingual brain, running verbatim on windart) is
+// spawned at boot; Do It routes through it over the wire, so `25 sqrt` and
+// `(2 + 3) * 7` share one workspace with no language toggle.
+SendPort _lang; // the language isolate's command port
+Future ask(String verb, arg) {
+  var reply = new ReceivePort();
+  _lang.send([verb, arg, reply.sendPort]);
+  return reply.first;
+}
+void spawnLanguage() {
+  const langSrc = r'e:\windart-talk\workspace\language.dart';
+  var scratch = new File(Directory.systemTemp.path + r'\ws_language.dart');
+  try {
+    scratch.writeAsStringSync(new File(langSrc).readAsStringSync());
+  } catch (e) {
+    print('LANG: cannot stage language.dart: $e');
+    return;
+  }
+  var rp = new ReceivePort();
+  rp.listen((msg) {
+    if (_lang == null && msg is SendPort) {
+      _lang = msg;
+      print('LANG: bilingual language isolate up');
+    } else if (msg is List && msg.isNotEmpty && msg[0] == 'tr') {
+      wsLog.writeln(msg[1].toString()); // Smalltalk Transcript -> Output pane
+    }
+  });
+  Isolate.spawnUri(scratch.uri, <String>[scratch.path, '', '', ''], rp.sendPort);
+}
+
 void doIt() {
   var sel = ui.editorSelection('ws_editor');
   var code = sel[2].toString().replaceAll('\r', ' ').trim();
   if (code.isEmpty) return;
-  var result = wsEval(code);
-  wsLog.writeln('$code   =>   $result');
-  print('DOIT: $code => $result');
-  ui.set('ws_output', {'text': wr(wsLog.toString())});
-  ui.commit();
+  if (_lang == null) {
+    print('DOIT: $code => (language isolate not ready)');
+    return;
+  }
+  ask('doit', code).then((result) {
+    wsLog.writeln('$code   =>   $result');
+    print('DOIT: $code => $result');
+    ui.set('ws_output', {'text': wr(wsLog.toString())});
+    ui.commit();
+  });
 }
 
 // Smalltalk-style member side: 0 = instance (non-static), 1 = class (static
@@ -1348,6 +1384,7 @@ void pollMenu() {
 main(List<String> args) {
   var selftest = args.contains('selftest');
   var bake = args.contains('bake');   // W1: write the on-disk snapshot into the image
+  spawnLanguage();   // C1: start the bilingual language isolate (Do It routes here)
 
   // Browser data: the VM's class table, grouped by library (the Browser's
   // categories). classMirrors/classNames stay flat for Find/Docs/nav.
@@ -1496,6 +1533,13 @@ main(List<String> args) {
     }); t += 450;
     new Timer(new Duration(milliseconds: t), () { snap('splitter_after'); }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(0); doIt(); snap('tab_workspace'); }); t += 450;
+    // C1: bilingual Do It — Smalltalk AND Dart through the same workspace wire.
+    new Timer(new Duration(milliseconds: t), () {
+      ask('doit', '25 sqrt').then((r) => print('ST-DOIT: 25 sqrt => $r'));
+      ask('doit', '#(1 2 3) size').then((r) => print('ST-DOIT: #(1 2 3) size => $r'));
+      ask('doit', 'st> 6 * 7').then((r) => print('ST-DOIT: st> 6*7 => $r'));
+      ask('doit', '(2 + 3) * 7').then((r) => print('ST-DOIT: (2+3)*7 => $r'));
+    }); t += 600;
     new Timer(new Duration(milliseconds: t), () { switchTab(2); snap('tab_editor'); }); t += 450;
     // Item 3: a VM class in the Editor shows the full declaration incl. real
     // method signatures (return + parameter types), not just member names.
