@@ -513,6 +513,18 @@ Future<String> handle(String line) async {
       }
       browseToClass(c);
       return 'browsed ' + c;
+    case 'edclass':
+      switchTab(2);
+      loadEditorClass(arg.trim());
+      currentEditClass = arg.trim();
+      return 'editing ' + arg.trim();
+    case 'edset':
+      ui.set('ed_source', {'text': arg});
+      ui.commit();
+      return 'ok';
+    case 'edaccept':
+      accept();
+      return 'accept fired for ' + currentEditClass;
     case 'doit':
       if (_lang == null) return '(language isolate not ready)';
       return (await ask('doit', arg)).toString();
@@ -784,6 +796,8 @@ void buildEditorClassList() {
   for (var r in rows) { var n = r[0].toString(); if (seen.add(n)) editorClassList.add(n); }
   if (seen.add('Counter')) editorClassList.insert(0, 'Counter');     // always offer Counter
   for (var n in classNames) { if (seen.add(n)) editorClassList.add(n); }   // then VM classes
+  var st = _stClasses.toList()..sort();
+  for (var n in st) { if (seen.add(n)) editorClassList.add(n); }           // C3: Smalltalk classes
 }
 
 String editorSourceFor(String cls) {
@@ -806,6 +820,17 @@ String editorSourceFor(String cls) {
 
 void loadEditorClass(String cls) {
   currentEditClass = cls;
+  if (_stClasses.contains(cls)) {   // C3: Smalltalk class — real source over the wire
+    ui.set('ed_status', {'text': 'loading Smalltalk $cls ...'});
+    ui.commit();
+    ask('classsrc', cls).then((src) {
+      ui.set('ed_source', {'text': wr(src.toString())});
+      ui.set('ed_status', {'text': 'editing $cls   (Smalltalk — Accept recompiles it live)'});
+      ui.commit();
+    });
+    print('EDITOR: selected ST class $cls');
+    return;
+  }
   var src = editorSourceFor(cls);
   ui.set('ed_source', {'text': wr(src)});
   ui.set('ed_status', {'text': 'editing $cls'});
@@ -863,6 +888,23 @@ String liveState() {
 void accept() {
   var sel = ui.editorSelection('ed_source');
   var src = sel[2].toString().replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
+  // C3: a Smalltalk edit (a known ST class, or source shaped `X subclass: Y [`)
+  // recompiles LIVE through the language isolate — morphing, image-backed, with
+  // an ERR (rollback-safe) on a bad parse. dart:mirrors never sees it.
+  if (_stClasses.contains(currentEditClass) ||
+      new RegExp(r'\bsubclass:\s*\w+\s*\[').hasMatch(src)) {
+    ui.set('ed_status', {'text': 'accepting Smalltalk $currentEditClass ...'});
+    ui.commit();
+    ask('accept', src).then((r) {
+      var rs = r.toString();
+      var ok = !rs.startsWith('ERR');
+      ui.set('ed_status', {'text': (ok ? 'Accepted ' : 'REJECTED ') + '$currentEditClass  (Smalltalk): $rs'});
+      ui.commit();
+      _stClasses.add(currentEditClass);
+      print('ACCEPT ST: $currentEditClass -> $rs');
+    });
+    return;
+  }
   var isUser = userClassNames.contains(currentEditClass);
   // Validate-before-save (syntax-check-first): compile the edit in isolation; only
   // clean source is written to the image + reloaded, so the reload never sees
