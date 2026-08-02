@@ -10,6 +10,8 @@ import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';   // T4: spawn the debug target isolate
 import 'dart:mirrors';
+import 'dart:developer';   // C-harness: ext.dartui.send service extension (TCL GUI control)
+import 'dart:convert';     // JSON for the extension reply envelope
 import 'userlib:user';    // Stage 1: the live user library, served SYNCHRONOUSLY from
 // the SQLite image by a C++ tag handler (dart_win32/windart_userlib.cc) — no scratch
 // file, the DB is the source of truth. Single isolate: mirrors + a source import
@@ -361,7 +363,7 @@ void buildWorkspace() {
   var outlY = doitY + 34;
   var outY = outlY + 22;
   var outH = H - outY - 10;
-  ui.label('ws_lbl', text: 'Workspace   -   type Dart, click Do It (evaluates against the live VM)', frame: <int>[12, 36, W - 24, 18]); track('ws_lbl');
+  ui.label('ws_lbl', text: 'Workspace   -   type Dart OR Smalltalk, click Do It   (bilingual: 25 sqrt,  (2+3)*7,  st> 6*7)', frame: <int>[12, 36, W - 24, 18]); track('ws_lbl');
   ui.editor('ws_editor', text: '(2 + 3) * 7', frame: <int>[12, 58, W - 24, edH]); track('ws_editor');
   ui.button('ws_doit', title: 'Do It', frame: <int>[12, doitY, 100, 28], onClick: doIt); track('ws_doit');
   ui.label('ws_hint', text: '(result appended to Output below)', frame: <int>[124, doitY + 4, 500, 18]); track('ws_hint');
@@ -414,6 +416,69 @@ void doIt() {
     print('DOIT: $code => $result');
     ui.set('ws_output', {'text': wr(wsLog.toString())});
     ui.commit();
+  });
+}
+
+// ── C-harness: the ext.dartui.send service extension — LIVE GUI control over the
+// VM service (dartui --observe, ws://127.0.0.1:8181) for the TCL snapshot
+// regression suite (tcl/dartui.tcl). `ui <verb> <arg>`: doit/snap/tab/type/editor
+// are handled here; any OTHER verb forwards straight to the language isolate
+// (classes/members/classsrc/accept/apps/stgame/...), so TCL drives the whole
+// bilingual backend without a per-verb stub here.
+Future<String> handle(String line) async {
+  line = line.trim();
+  var sp = line.indexOf(' ');
+  var verb = sp < 0 ? line : line.substring(0, sp);
+  var arg = sp < 0 ? '' : line.substring(sp + 1);
+  switch (verb) {
+    case 'ping':
+      return 'pong';
+    case 'snap':
+      var p = arg.trim().isEmpty ? r'e:\windart-talk\build\ui.png' : arg.trim();
+      wsSnapshotFull(p);
+      return 'ok:' + p;
+    case 'tab':
+      switchTab(int.parse(arg.trim(), onError: (_) => 0));
+      ui.commit();
+      return 'ok';
+    case 'type':
+      ui.set('ws_editor', {'text': arg});
+      ui.commit();
+      return 'ok';
+    case 'editor':
+      var s = ui.editorSelection('ws_editor');
+      return s.length > 2 ? s[2].toString() : '';
+    case 'doit':
+      if (_lang == null) return '(language isolate not ready)';
+      return (await ask('doit', arg)).toString();
+    default:
+      if (_lang == null) return '(language isolate not ready)';
+      return (await ask(verb, arg)).toString();
+  }
+}
+
+void registerDartuiExt() {
+  registerExtension('ext.dartui.send',
+      (String method, Map<String, String> params) async {
+    var line = params['line'];
+    if (line == null) {
+      return new ServiceExtensionResponse.error(
+          ServiceExtensionResponse.kInvalidParams,
+          "ext.dartui.send needs a 'line' parameter");
+    }
+    try {
+      if (params['nowait'] == 'true') {
+        handle(line).catchError((e) {});
+        return new ServiceExtensionResponse.result(
+            JSON.encode(<String, String>{'reply': 'started'}));
+      }
+      var reply = await handle(line);
+      return new ServiceExtensionResponse.result(
+          JSON.encode(<String, String>{'reply': reply.toString()}));
+    } catch (e) {
+      return new ServiceExtensionResponse.result(
+          JSON.encode(<String, String>{'reply': 'ERR: ' + e.toString()}));
+    }
   });
 }
 
@@ -1385,6 +1450,7 @@ main(List<String> args) {
   var selftest = args.contains('selftest');
   var bake = args.contains('bake');   // W1: write the on-disk snapshot into the image
   spawnLanguage();   // C1: start the bilingual language isolate (Do It routes here)
+  registerDartuiExt();   // C-harness: ext.dartui.send for TCL GUI control + snapshots
 
   // Browser data: the VM's class table, grouped by library (the Browser's
   // categories). classMirrors/classNames stay flat for Find/Docs/nav.
