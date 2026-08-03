@@ -84,11 +84,22 @@ String currentLib = '';
 List<String> libClasses = <String>[];                         // classes in currentLib
 List<String> brVars = <String>[];                             // currentClass variables
 List<String> brMethods = <String>[];                          // currentClass methods
+Map<String, String> _stMethSrc = <String, String>{};         // selector -> real ST method source (the fixed slicer's slices)
 
 String imgPath;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 String wr(String s) => s.replaceAll('\n', '\r');   // Dart \n -> RichEdit break
+
+// Selector from a method signature: 'from: a to: b' -> 'from:to:', '< x' -> '<',
+// 'size' -> 'size'. A byte-for-byte mirror of _sigToSelector in language.dart, so
+// a selected member row keys into the per-method source cache built from methodsrc.
+String _sigToSelector(String sig) {
+  if (!sig.contains(':')) return sig.trim().split(' ')[0];
+  var out = new StringBuffer();
+  for (var tok in sig.split(' ')) { if (tok.endsWith(':')) out.write(tok); }
+  return out.toString();
+}
 
 void loadMembers(String cls) {
   members = <String>[];
@@ -454,6 +465,21 @@ Future _browseStClass(String cls) async {
   brVars = <String>[];
   brMethods = (mems is List) ? mems.map((e) => e.toString()).toList() : <String>[];
   brMethods.sort();
+  // Cache every method's REAL source in one bulk round-trip, so selecting a method
+  // shows its whole body (the fixed slicer's slice), not just the heading. methodsrc
+  // streams "<i|c> <selector>\n<source>\n" per method; we key by selector, the
+  // same key our _sigToSelector(brMethods[r]) computes on selection.
+  _stMethSrc = <String, String>{};
+  var bulk = (await ask('methodsrc', cls)).toString();
+  for (var block in bulk.split(new String.fromCharCode(0x1d))) {
+    if (block.isEmpty) continue;
+    var nl = block.indexOf('\n');
+    if (nl < 0) continue;
+    var head = block.substring(0, nl).trim();            // "i selector" | "c selector"
+    var sp = head.indexOf(' ');
+    var sel = sp < 0 ? head : head.substring(sp + 1);
+    _stMethSrc[sel] = block.substring(nl + 1);           // full method source
+  }
   ui.set('br_vl', {'text': 'Variables - instance (0)'});
   ui.set('br_ml', {'text': 'Methods - instance (${brMethods.length})'});
   ui.set('br_vars', {'rows': 0});
@@ -461,7 +487,8 @@ Future _browseStClass(String cls) async {
   var src = await ask('classsrc', cls);
   ui.set('br_source', {'text': wr(src.toString())});
   ui.commit();
-  print('BROWSE ST: ' + cls + ' (' + brMethods.length.toString() + ' methods)');
+  print('BROWSE ST: ' + cls + ' (' + brMethods.length.toString() +
+      ' methods, ' + _stMethSrc.length.toString() + ' sources cached)');
 }
 
 void doIt() {
@@ -518,6 +545,19 @@ Future<String> handle(String line) async {
       }
       browseToClass(c);
       return 'browsed ' + c;
+    case 'selmeth':
+      // Select a method in the Browser's member list (drives selectBrMethod, the
+      // per-method source view). Arg is a 0-based index, or a selector/signature.
+      var a = arg.trim();
+      var idx = int.parse(a, onError: (_) => -1);
+      if (idx < 0) {
+        for (var i = 0; i < brMethods.length; i++) {
+          if (brMethods[i] == a || _sigToSelector(brMethods[i]) == a) { idx = i; break; }
+        }
+      }
+      if (idx < 0 || idx >= brMethods.length) return 'ERR no method ' + a;
+      selectBrMethod(idx);
+      return 'selected ' + brMethods[idx];
     case 'edclass':
       switchTab(2);
       loadEditorClass(arg.trim());
@@ -750,11 +790,26 @@ void selectBrVar(int r) {
 }
 void selectBrMethod(int r) {
   if (r < 0 || r >= brMethods.length) return;
-  var real = sdkMemberSource(currentClass, brMethods[r]);   // real body if on disk
-  var src = real.isNotEmpty ? real : '// $currentLib  ::  $currentClass\n${brMethods[r]}\n';
+  var sig = brMethods[r];
+  if (_stClasses.contains(currentClass)) {
+    // Smalltalk: show the method's WHOLE body from the slice cache (populated in
+    // _browseStClass over the wire). Before this, the ST path fell through to the
+    // Dart-disk reader below, which returns nothing for ST classes — so the pane
+    // showed only the heading. Key by selector, exactly as the cache is built.
+    var src = _stMethSrc[_sigToSelector(sig)];
+    if (src == null || src.trim().isEmpty) {
+      src = '"' + currentClass + ' >> ' + sig + '  (source unavailable)"\n' + sig + '\n';
+    }
+    ui.set('br_source', {'text': wr(src)}); ui.commit();
+    ui.applySpans('br_source', lexDart(src));   // no ST lexer yet; matches the editor
+    print('BROWSE ST: method ' + sig);
+    return;
+  }
+  var real = sdkMemberSource(currentClass, sig);   // real body if on disk (Dart)
+  var src = real.isNotEmpty ? real : '// $currentLib  ::  $currentClass\n$sig\n';
   ui.set('br_source', {'text': wr(src)}); ui.commit();
   ui.applySpans('br_source', lexDart(src));
-  print('BROWSE: method ${brMethods[r]}');
+  print('BROWSE: method $sig');
 }
 
 // Flat-index entry (toolbar Back/Forward/Home history, Find jumps).
