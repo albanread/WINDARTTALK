@@ -399,6 +399,8 @@ void spawnLanguage() {
       _loadStWorld();   // C2: import the ST world so its classes are browsable
     } else if (msg is List && msg.isNotEmpty && msg[0] == 'tr') {
       wsLog.writeln(msg[1].toString()); // Smalltalk Transcript -> Output pane
+    } else if (msg is List && msg.length >= 4 && msg[0] == 'appui') {
+      _appApply(msg[3]);   // C4: a running app's widget batch -> dart:win controls
     }
   });
   Isolate.spawnUri(scratch.uri, <String>[scratch.path, '', '', ''], rp.sendPort);
@@ -525,6 +527,20 @@ Future<String> handle(String line) async {
     case 'edaccept':
       accept();
       return 'accept fired for ' + currentEditClass;
+    case 'apprun':
+      switchTab(5);
+      _appName = arg.trim();
+      ui.set('app_status', {'text': 'running: $_appName'});
+      ui.commit();
+      return (await ask('apprun', [_appName, paneW.toDouble(), paneH.toDouble()])).toString();
+    case 'appstop':
+      var r = (_lang == null) ? 'ok' : (await ask('appstop', '')).toString();
+      _appName = '';
+      return r;
+    case 'click':
+      if (_lang == null) return '(no lang)';
+      await ask('appevent', [arg.trim(), 'click', '']);
+      return 'clicked ' + arg.trim();
     case 'doit':
       if (_lang == null) return '(language isolate not ready)';
       return (await ask('doit', arg)).toString();
@@ -1157,16 +1173,74 @@ class Calculator {
   }
 }
 Calculator calc;
+// ── C4: run a Smalltalk (or Dart) app in the App pane. The language isolate
+// hosts the app instance; its widgets arrive as ['appui', name, gen, cmds] and
+// materialize here on dart:win. Button/field callbacks post back as
+// ['appevent', id, kind, value] and fire the app's ST (or Dart) handler block.
+String _appName = '';
+List<String> _appWidgets = <String>[];
+
+List<int> _frameOf(p) {
+  var f = (p is Map) ? p['frame'] : null;
+  if (f is List && f.length >= 4) return f.map((e) => (e as num).toInt()).toList();
+  return <int>[12, 92, 240, 24];
+}
+
+void _appApply(List batch) {
+  if (activeTab != 5) return;   // only materialize while the App pane is showing
+  for (var cmd in batch) {
+    if (cmd is! List || cmd.isEmpty) continue;
+    var op = cmd[0].toString();
+    if (op == 'clear') {
+      _appWidgets.clear();
+    } else if (op == 'title') {
+      ui.set('app_status', {'text': 'running: $_appName   -   ${cmd.length > 1 ? cmd[1] : ''}'});
+    } else if (op == 'set' && cmd.length >= 3 && cmd[2] is Map) {
+      ui.set(cmd[1].toString(), cmd[2]);
+    } else if (op == 'add' && cmd.length >= 4) {
+      var kind = cmd[1].toString(), id = cmd[2].toString(), p = cmd[3];
+      var frame = _frameOf(p);
+      var text = (p is Map && p['text'] != null) ? p['text'].toString() : '';
+      var title = (p is Map && p['title'] != null) ? p['title'].toString() : '';
+      if (_appWidgets.contains(id)) {   // re-`add` of a live widget = update it in place
+        var props = <String, dynamic>{};
+        if (text.isNotEmpty) props['text'] = text;
+        if (title.isNotEmpty) props['title'] = title;
+        if (props.isNotEmpty) ui.set(id, props);
+        continue;
+      }
+      _appWidgets.add(id);
+      switch (kind) {
+        case 'label': ui.label(id, text: text, frame: frame); break;
+        case 'field': case 'secure': ui.field(id, text: text, frame: frame); break;
+        case 'button':
+          ui.button(id, title: title, frame: frame, onClick: () => _sendAppEvent(id, 'click', '')); break;
+        case 'checkbox':
+          ui.checkbox(id, title: title, checked: (p is Map && p['value'] == true), frame: frame); break;
+        case 'popup':
+          var items = (p is Map && p['items'] is List) ? p['items'] : const [];
+          ui.popup(id, items: items, frame: frame, onSelect: (i) => _sendAppEvent(id, 'select', '$i')); break;
+        default: ui.label(id, text: '[$kind $id]', frame: frame);
+      }
+      track(id);
+    }
+  }
+  ui.commit();
+}
+
+void _sendAppEvent(String id, String kind, value) {
+  if (_lang == null) return;
+  ask('appevent', [id, kind, value.toString()]);   // fire the ST/Dart handler
+  print('APP-EVENT: $id/$kind');
+}
+
 void buildApp() {
-  // The Calculator owns the pane from y=40 down; put the workspace's own caption
-  // in the empty area to the RIGHT of the keypad so it clears both the tab strip
-  // and the app's widgets.
-  ui.label('app_lbl', text: 'App   -   a live user app (Calculator) running', frame: <int>[360, 44, 700, 18]); track('app_lbl');
-  ui.label('app_lbl2', text: 'inside the workspace; the buttons are Dart closures.', frame: <int>[360, 66, 700, 18]); track('app_lbl2');
-  var before = ui.widgetIds.toSet();
-  if (calc == null) calc = new Calculator();
-  calc.build(ui);
-  for (var id in ui.widgetIds) { if (!before.contains(id)) track(id); }
+  var W = paneW;
+  ui.label('app_lbl', text: 'App   -   run a live app:   ui apprun <StClass>   (a class with  build: ui  [ ... ])', frame: <int>[12, 40, W - 24, 18]); track('app_lbl');
+  ui.label('app_status', text: _appName.isEmpty ? 'no app running' : 'running: $_appName', frame: <int>[12, 64, W - 24, 18]); track('app_status');
+  if (_appName.isNotEmpty && _lang != null) {
+    ask('appbuild', [_appName, paneW.toDouble(), paneH.toDouble()]);   // re-render after a tab rebuild
+  }
 }
 
 // ── Docs tab (T2): a class/member reference from the VM class table ───────────
