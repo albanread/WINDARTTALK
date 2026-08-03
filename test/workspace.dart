@@ -401,6 +401,9 @@ void spawnLanguage() {
       wsLog.writeln(msg[1].toString()); // Smalltalk Transcript -> Output pane
     } else if (msg is List && msg.length >= 4 && msg[0] == 'appui') {
       _appApply(msg[3]);   // C4: a running app's widget batch -> dart:win controls
+    } else if (_stGameActive && msg is List && msg.isNotEmpty &&
+               (msg[0] == 'port' || msg[0] == 'draw' || msg[0] == 'done')) {
+      _gameFrame(msg);   // C5: ST game frames -> the D3D11 game pane
     }
   });
   Isolate.spawnUri(scratch.uri, <String>[scratch.path, '', '', ''], rp.sendPort);
@@ -541,6 +544,15 @@ Future<String> handle(String line) async {
       if (_lang == null) return '(no lang)';
       await ask('appevent', [arg.trim(), 'click', '']);
       return 'clicked ' + arg.trim();
+    case 'stgames':
+      return (await ask('stgames', '')).toString();
+    case 'stgame':
+      switchTab(9);
+      startStGame(arg.trim());
+      return 'st game ' + arg.trim();
+    case 'gpsnap':
+      var gp = arg.trim().isEmpty ? r'e:\windart-talk\build\gp.png' : arg.trim();
+      return 'gpsnap: ' + gpSnap(gp);   // read the D3D offscreen pixels to a PNG
     case 'doit':
       if (_lang == null) return '(language isolate not ready)';
       return (await ask('doit', arg)).toString();
@@ -1465,9 +1477,54 @@ void gameSchedule() {
   if (!gameDone && activeTab == 9) new Timer(new Duration(milliseconds: 16), gameTick);
 }
 
+// ── C5: run a Smalltalk game in the D3D11 game pane. The ST game runs in the
+// language isolate (GamePane launch -> stepWithKeys: -> stGpTake), pushing the
+// SAME ['port']/['draw']/gp* stream a Dart demo isolate does — so it renders
+// through this one _gameFrame path + pull-tick.
+bool _stGameActive = false;
+
+void _gameFrame(List msg) {
+  if (gameDone || msg.isEmpty) return;
+  if (msg[0] == 'port') { gameCtl = msg[1]; gameTick(); return; }
+  if (msg[0] == 'done') {
+    gameDone = true;
+    if (ui.ticketOf('gm_status') != null) ui.set('gm_status', {'text': 'done: ${msg.length > 1 ? msg[1] : ''}'});
+    return;
+  }
+  if (msg[0] != 'draw') return;
+  var cmds = msg[1];
+  if (!gameOpened) {
+    var first = (cmds is List && cmds.isNotEmpty && cmds[0] is List && cmds[0].isNotEmpty) ? cmds[0][0] : null;
+    if (first == 'gpopen') {
+      var o = cmds[0];
+      gpOpen(o[1], o[2], o[3], o[4], 0);
+      gameOpened = true;
+      if (cmds.length > 1) gpApply(cmds.sublist(1));   // apply the initial frame's draw commands
+      gameFrames++;
+      gameSchedule();
+      return;
+    }
+    gpOpen(gpW, gpH, gpW, gpH, 0);
+    gameOpened = true;
+  }
+  gpApply(cmds);                                  // apply + render_present + swapchain Present
+  gameFrames++;
+  gameSchedule();
+}
+
+void startStGame(String name) {
+  stopGame();
+  keyWatch(); keyCapture(true);
+  gameSel = name; gameDone = false; gameOpened = false; gameFrames = 0;
+  _stGameActive = true;
+  if (ui.ticketOf('gm_status') != null) { ui.set('gm_status', {'text': 'running (Smalltalk): $name'}); ui.commit(); }
+  ask('stgame', name).then((r) { if (r.toString().startsWith('ERR')) print('ST game $name: $r'); });
+}
+
 void stopGame() {
   gameDone = true;
   keyCapture(false);              // release the keyboard back to the workspace
+  if (_stGameActive) { _stGameActive = false; if (_lang != null) ask('stgamestop', gameSel); }
   if (gameRp != null) { gameRp.close(); gameRp = null; }
   gameCtl = null;
   if (gameIso != null) { try { gameIso.kill(priority: Isolate.immediate); } catch (e) {} gameIso = null; }
@@ -1483,25 +1540,8 @@ void startGame(String name) {
   var rp = new ReceivePort();
   gameRp = rp;
   rp.listen((msg) {
-    if (gameDone || rp != gameRp || msg is! List || msg.isEmpty) return;   // stale/late frame
-    if (msg[0] == 'port') { gameCtl = msg[1]; gameTick(); return; }
-    if (msg[0] != 'draw') return;
-    var cmds = msg[1];
-    if (!gameOpened) {
-      var first = (cmds is List && cmds.isNotEmpty && cmds[0] is List && cmds[0].isNotEmpty) ? cmds[0][0] : null;
-      if (first == 'gpopen') {
-        var o = cmds[0];
-        gpOpen(o[1], o[2], o[3], o[4], 0);
-        gameOpened = true;
-        gameSchedule();
-        return;                                   // the gpopen frame just opens; invite the next
-      }
-      gpOpen(gpW, gpH, gpW, gpH, 0);
-      gameOpened = true;
-    }
-    gpApply(cmds);                                // apply + render_present + swapchain Present
-    gameFrames++;
-    gameSchedule();
+    if (rp != gameRp || msg is! List) return;     // stale/late frame from a prior run
+    _gameFrame(msg);
   });
   Isolate.spawnUri(Uri.parse('demos/$name.dart'), <String>['$gpW', '$gpH'], rp.sendPort)
       .then((iso) { gameIso = iso; })
