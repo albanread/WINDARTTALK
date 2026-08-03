@@ -1,0 +1,101 @@
+diff --git a/workspace/language.dart b/workspace/language.dart
+index a21547d..b42c7e2 100644
+--- a/workspace/language.dart
++++ b/workspace/language.dart
+@@ -1147,6 +1147,9 @@ main(List args, SendPort uiPort) {
+       else if (cmd == 'stgamestop') out = _stGameStop(arg.toString());
+       else if (cmd == 'stgames') out = _stGameList();
+       else if (cmd == 'sthaltarm') out = stHaltArm(arg);
++      else if (cmd == 'inspect') out = _inspect(arg.toString());
++      else if (cmd == 'inspectivar') out = _inspectIvar(arg.toString());
++      else if (cmd == 'inspectback') out = _inspectBack();
+       else if (cmd == 'ping') out = 'lang-pong';
+       else out = 'ERR: unknown ' + cmd.toString();
+     } catch (e) {
+@@ -1209,6 +1212,86 @@ String _stDoit(String code) {
+   }
+ }
+ 
++// --- windart C6: object inspector -------------------------------------------
++// The dartui Inspector reflects a LIVE ST object, and ST objects live in THIS
++// isolate — so the reflection runs here and only a flat, string-only view goes
++// over the wire:  [ className, printString, [ [ivarName, valuePrint], ... ] ].
++// `inspect <expr>` RETAINS the evaluated object (in _inspStack) so drilling into
++// an instance variable navigates the same object graph, not a fresh evaluation.
++// HAZARD: instVarAt: indexes the full super-chain-first layout, but
++// instVarNamesOf answers only a class's OWN fields — so walk Object..class
++// super-first to line the names up with the slots.
++List<dynamic> _inspStack = <dynamic>[];
++
++List<String> _allIvarNames(cls) {
++  var chain = <dynamic>[];
++  var c = cls;
++  while (c != null) { chain.add(c); c = stSuperclassOf(c); }
++  var names = <String>[];
++  for (var i = chain.length - 1; i >= 0; i--) {   // Object first, class last
++    var own = stInstVarNamesOf(chain[i]);
++    if (own is List) { for (var n in own) names.add(n.toString()); }
++  }
++  return names;
++}
++
++List _inspStructOf(v) {
++  if (v == null) return <dynamic>['UndefinedObject', 'nil', <dynamic>[]];
++  var cname, pstr;
++  try { cname = stClassNameOf(stClassOf(v)).toString(); } catch (e) { cname = '?'; }
++  try { pstr = stPrintOf(v).toString(); } catch (e) { pstr = '<printString failed>'; }
++  var ivars = <dynamic>[];
++  try {
++    var names = _allIvarNames(stClassOf(v));
++    for (var i = 0; i < names.length; i++) {
++      var vp;
++      try {
++        var val = stInstVarAt(v, i + 1);   // 1-based, super-chain-first
++        vp = val == null ? 'nil' : stPrintOf(val).toString();
++      } catch (e) { vp = '<unreadable>'; }
++      ivars.add(<String>[names[i], vp]);
++    }
++  } catch (e) { /* value has no named ivars (SmallInteger, String, Symbol...) */ }
++  return <dynamic>[cname, pstr, ivars];
++}
++
++// Evaluate an ST expression to its OBJECT (not printString) — the single-expr
++// core of _stDoit, kept separate so the inspector can retain the result.
++_inspEvalObj(String code) {
++  var n = ++_stDoitN;
++  var cls = 'STInsp' + n.toString();
++  var src = 'Object subclass: ' + cls + ' [ ' + cls +
++      ' class >> doIt [ ^ ( ' + code.trim() + ' ) ] ]';
++  var r = stLoad(src);
++  if (r.startsWith('ERR:')) throw r;
++  return stInvokeStatic(cls, 'doIt', <dynamic>[]);
++}
++
++_inspect(String expr) {
++  try {
++    var v = _inspEvalObj(expr);
++    _inspStack = <dynamic>[v];
++    return _inspStructOf(v);
++  } catch (e) { return 'ERR: ' + e.toString(); }
++}
++
++_inspectIvar(String indexStr) {
++  if (_inspStack.isEmpty) return 'ERR: nothing is being inspected';
++  var idx = int.parse(indexStr.trim(), onError: (_) => -1);   // 1-based
++  if (idx < 1) return 'ERR: bad instVar index ' + indexStr;
++  try {
++    var child = stInstVarAt(_inspStack.last, idx);
++    _inspStack.add(child);
++    return _inspStructOf(child);
++  } catch (e) { return 'ERR: ' + e.toString(); }
++}
++
++_inspectBack() {
++  if (_inspStack.length > 1) _inspStack.removeLast();
++  if (_inspStack.isEmpty) return <dynamic>['nil', 'nil', <dynamic>[]];
++  return _inspStructOf(_inspStack.last);
++}
++
+ // Does a do-it read as DART? Markers only — anything unmarked gets offered to
+ // the ST parser first (below), so `25 sqrt` works without an st> prefix.
+ // Deliberately NOT markers: `;` (an ST cascade), `//` (ST integer division).

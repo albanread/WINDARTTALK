@@ -69,7 +69,7 @@ int paneH = 712;
 List<String> content = <String>[];        // ids of the current tab's content widgets
 Set<String> persistentWidgets = <String>{};  // widgets that survive a tab switch (tab strip etc.)
 StringBuffer wsLog = new StringBuffer();
-final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help','Game'];
+final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help','Game','Inspect'];
 
 Map<String, ClassMirror> classMirrors = <String, ClassMirror>{};
 List<String> classNames = <String>[];
@@ -596,6 +596,20 @@ Future<String> handle(String line) async {
     case 'doit':
       if (_lang == null) return '(language isolate not ready)';
       return (await ask('doit', arg)).toString();
+    case 'uinspect':                       // drive the Inspector tab + snapshot
+      if (activeTab != 10) switchTab(10);
+      ui.set('insp_expr', {'text': arg.trim()}); ui.commit();
+      await doInspect(arg.trim());
+      return 'inspected ' + arg.trim() + ' -> ' + inspClass + ' (' + inspIvars.length.toString() + ' ivars)';
+    case 'uinspsel':
+      _showInspSlot(int.parse(arg.trim(), onError: (_) => 0));
+      return 'slot ' + inspSel.toString();
+    case 'uinspdive':
+      await inspectDive();
+      return 'dived -> ' + inspClass;
+    case 'uinspback':
+      await inspectBack();
+      return 'back -> ' + inspClass;
     default:
       if (_lang == null) return '(language isolate not ready)';
       return (await ask(verb, arg)).toString();
@@ -1617,6 +1631,99 @@ void buildGame() {
   startGame(gameSel);
 }
 
+// ── Inspect tab (T10): the Smalltalk object inspector ─────────────────────────
+// Evaluate an expression in the language isolate, which RETAINS the result and
+// reflects it into a self + instance-variables view. Selecting a slot shows its
+// printString; Dive re-inspects that slot's value (drills into the live object
+// graph), Back pops. ST objects never cross the wire — all reflection is
+// server-side (language.dart inspect/inspectivar/inspectback), and only the flat
+// [class, printString, [[name,value],...]] view comes back.
+String inspClass = '', inspPrint = '';
+List<List<String>> inspIvars = <List<String>>[];   // [ivarName, valuePrintString]
+int inspSel = 0;                                    // 0 = self, 1..n = ivar row
+String inspExprText = '3 / 4';
+
+void _showInspSlot(int s) {
+  inspSel = s;
+  var text;
+  if (s == 0) {
+    text = 'self  :  ' + inspClass + '\n\n' + inspPrint;
+  } else if (s - 1 < inspIvars.length) {
+    text = inspIvars[s - 1][0] + '  =\n\n' + inspIvars[s - 1][1];
+  } else {
+    text = '';
+  }
+  ui.set('insp_detail', {'text': wr(text)});
+  ui.commit();
+}
+
+void _paintInspect() {
+  ui.set('insp_hdr', {'text': inspClass.isEmpty
+      ? '(nothing inspected — type an expression and click Inspect)'
+      : inspClass + '        ' + inspPrint});
+  ui.set('insp_slots', {'rows': inspIvars.length + 1});
+  _showInspSlot(inspSel <= inspIvars.length ? inspSel : 0);
+  ui.commit();
+}
+
+void _renderInspect(r) {
+  if (r is List && r.length >= 3) {
+    inspClass = r[0].toString();
+    inspPrint = r[1].toString();
+    inspIvars = <List<String>>[];
+    if (r[2] is List) {
+      for (var e in r[2]) {
+        if (e is List && e.length >= 2) {
+          inspIvars.add(<String>[e[0].toString(), e[1].toString()]);
+        }
+      }
+    }
+    inspSel = 0;
+    _paintInspect();
+  } else {
+    inspClass = ''; inspPrint = ''; inspIvars = <List<String>>[];
+    ui.set('insp_hdr', {'text': 'Inspect error: ' + r.toString()});
+    ui.set('insp_slots', {'rows': 0});
+    ui.set('insp_detail', {'text': wr(r.toString())});
+    ui.commit();
+  }
+}
+
+Future doInspect(String expr) {
+  inspExprText = expr;
+  return ask('inspect', expr).then(_renderInspect);
+}
+Future inspectDive() {
+  if (inspSel < 1) return new Future.value();
+  return ask('inspectivar', inspSel.toString()).then(_renderInspect);
+}
+Future inspectBack() => ask('inspectback', '').then(_renderInspect);
+
+void buildInspect() {
+  var W = paneW, H = paneH;
+  ui.label('insp_lbl',
+      text: 'Inspector   -   evaluate an expression, then Dive into its instance variables (Smalltalk or Dart)',
+      frame: <int>[12, 36, W - 24, 18]); track('insp_lbl');
+  ui.field('insp_expr', text: inspExprText, frame: <int>[12, 60, W - 320, 24]); track('insp_expr');
+  ui.button('insp_go', title: 'Inspect', frame: <int>[W - 300, 58, 92, 28],
+      onClick: () => doInspect(ui.textOf('insp_expr'))); track('insp_go');
+  ui.button('insp_dive', title: 'Dive', frame: <int>[W - 204, 58, 84, 28], onClick: inspectDive); track('insp_dive');
+  ui.button('insp_back', title: 'Back', frame: <int>[W - 116, 58, 84, 28], onClick: inspectBack); track('insp_back');
+  ui.label('insp_hdr', text: '(nothing inspected)', frame: <int>[12, 90, W - 24, 18]); track('insp_hdr');
+  var top = 132, listW = (W - 36) ~/ 2, bodyH = H - top - 16;
+  ui.label('insp_sl', text: 'self + instance variables  (name : value)', frame: <int>[12, top - 20, listW, 18]); track('insp_sl');
+  ui.list('insp_slots', frame: <int>[12, top, listW, bodyH],
+      rowCount: () => inspIvars.length + 1,
+      cellAt: (r) => r == 0
+          ? 'self  :  ' + inspClass
+          : (r - 1 < inspIvars.length ? inspIvars[r - 1][0] + '  :  ' + inspIvars[r - 1][1] : ''),
+      onSelect: (r) => _showInspSlot(r)); track('insp_slots');
+  ui.label('insp_dl', text: 'selected slot', frame: <int>[12 + listW + 12, top - 20, W - 24 - listW - 12, 18]); track('insp_dl');
+  ui.editor('insp_detail', frame: <int>[12 + listW + 12, top, W - 24 - listW - 12, bodyH]); track('insp_detail');
+  ui.commit();
+  if (inspClass.isEmpty) doInspect(inspExprText); else _paintInspect();
+}
+
 void buildTab(int i) {
   if (activeTab == 9 && i != 9) stopGame();   // leaving the Game tab -> stop the game isolate
   activeTab = i;
@@ -1632,6 +1739,7 @@ void buildTab(int i) {
     case 7: buildVM(); break;
     case 8: buildHelp(); break;
     case 9: buildGame(); break;
+    case 10: buildInspect(); break;
     default: buildPlaceholder(i); break;
   }
   ui.commit();
