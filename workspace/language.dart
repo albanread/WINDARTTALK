@@ -1150,6 +1150,7 @@ main(List args, SendPort uiPort) {
       else if (cmd == 'inspect') out = _inspect(arg.toString());
       else if (cmd == 'inspectivar') out = _inspectIvar(arg.toString());
       else if (cmd == 'inspectback') out = _inspectBack();
+      else if (cmd == 'stdebug') out = _stDebug(arg.toString());
       else if (cmd == 'ping') out = 'lang-pong';
       else out = 'ERR: unknown ' + cmd.toString();
     } catch (e) {
@@ -1290,6 +1291,27 @@ _inspectBack() {
   if (_inspStack.length > 1) _inspStack.removeLast();
   if (_inspStack.isEmpty) return <dynamic>['nil', 'nil', <dynamic>[]];
   return _inspStructOf(_inspStack.last);
+}
+
+// windart C6: run an ST expression and report its outcome + call stack. ST
+// compiles to Dart IL, so a caught exception's stack trace frames ARE the ST
+// methods that were executing. On success the result is left inspectable (the
+// debugger can hand off to the inspector). Returns:
+//   [ 'ok',  printString ]                 — ran clean
+//   [ 'err', message, [ frame, ... ] ]     — raised; frames top-of-stack first
+_stDebug(String code) {
+  try {
+    var v = _inspEvalObj(code);
+    _inspStack = <dynamic>[v];
+    return <dynamic>['ok', v == null ? 'nil' : stPrintOf(v).toString()];
+  } catch (e, st) {
+    var frames = <String>[];
+    for (var line in st.toString().split('\n')) {
+      var t = line.trim();
+      if (t.isNotEmpty) frames.add(t);
+    }
+    return <dynamic>['err', e.toString(), frames];
+  }
 }
 
 // Does a do-it read as DART? Markers only — anything unmarked gets offered to

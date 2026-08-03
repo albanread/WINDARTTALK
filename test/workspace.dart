@@ -69,7 +69,7 @@ int paneH = 712;
 List<String> content = <String>[];        // ids of the current tab's content widgets
 Set<String> persistentWidgets = <String>{};  // widgets that survive a tab switch (tab strip etc.)
 StringBuffer wsLog = new StringBuffer();
-final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help','Game','Inspect'];
+final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help','Game','Inspect','ST Debug'];
 
 Map<String, ClassMirror> classMirrors = <String, ClassMirror>{};
 List<String> classNames = <String>[];
@@ -610,6 +610,16 @@ Future<String> handle(String line) async {
     case 'uinspback':
       await inspectBack();
       return 'back -> ' + inspClass;
+    case 'usdebug':                        // drive the ST Debug tab + snapshot
+      if (activeTab != 11) switchTab(11);
+      ui.set('sdb_expr', {'text': arg.trim()}); ui.commit();
+      await debugStRun(arg.trim());
+      return sdbError.isEmpty
+          ? 'ok -> ' + sdbResult
+          : 'raised -> ' + sdbError.split('\n')[0] + ' (' + sdbFrames.length.toString() + ' ST frames)';
+    case 'usdbsel':
+      _showStFrame(int.parse(arg.trim(), onError: (_) => -1));
+      return 'frame ' + sdbSel.toString();
     default:
       if (_lang == null) return '(language isolate not ready)';
       return (await ask(verb, arg)).toString();
@@ -1724,6 +1734,106 @@ void buildInspect() {
   if (inspClass.isEmpty) doInspect(inspExprText); else _paintInspect();
 }
 
+// ── ST Debug tab (T11): the Smalltalk post-mortem debugger ────────────────────
+// Run an expression in the language isolate; on failure it answers the call
+// STACK. ST compiles to Dart IL, so the frames ARE the ST methods (DbgDemo>>inner
+// with an st:mst source location) — we keep those and drop the Dart plumbing.
+// A full live stepper (breakpoints, resume, frame locals) needs the VM-service
+// client pointed at the language isolate — a separate native slice; this shows
+// where an error/`halt` happened, and hands the receiver to the Inspector.
+List<List<String>> sdbFrames = <List<String>>[];   // [displayName, rawFrame]
+String sdbError = '', sdbResult = '';
+int sdbSel = -1;
+String sdbExprText = '(Array new: 3) at: 10';
+
+// Keep only ST frames (located in st:mst source), reformatted ClassName>>selector.
+List<List<String>> _stFramePairs(List raw) {
+  var out = <List<String>>[];
+  var re = new RegExp(r'#\d+\s+(.+?)\s+\(st:mst/');
+  for (var f in raw) {
+    var s = f.toString();
+    if (!s.contains('st:mst/')) continue;          // drop dart:* / wire plumbing
+    var m = re.firstMatch(s);
+    var name = m == null ? s : m.group(1);
+    if (new RegExp(r'^STInsp\d+ class\.doIt$').hasMatch(name)) {
+      name = '<Do It>';
+    } else if (name.contains(' class.')) {
+      name = name.replaceFirst(' class.', ' class>>');
+    } else {
+      name = name.replaceFirst('.', '>>');
+    }
+    out.add(<String>[name, s]);
+  }
+  return out;
+}
+
+void _showStFrame(int i) {
+  sdbSel = i;
+  var text;
+  if (i < 0 || i >= sdbFrames.length) {
+    text = sdbError.isEmpty ? (sdbResult.isEmpty ? '' : 'Result:\n\n' + sdbResult) : sdbError;
+  } else {
+    text = 'Frame:  ' + sdbFrames[i][0] + '\n\n' + sdbFrames[i][1] + '\n\n— error —\n' + sdbError;
+  }
+  ui.set('sdb_detail', {'text': wr(text)});
+  ui.commit();
+}
+
+void _renderStDebug(r) {
+  if (r is! List || r.isEmpty) {
+    sdbError = 'bad reply: ' + r.toString(); sdbResult = ''; sdbFrames = <List<String>>[];
+    ui.set('sdb_status', {'text': sdbError});
+    ui.set('sdb_stack', {'rows': 0});
+    ui.set('sdb_detail', {'text': wr(sdbError)});
+    ui.commit();
+    return;
+  }
+  if (r[0] == 'ok') {
+    sdbResult = r.length > 1 ? r[1].toString() : '';
+    sdbError = ''; sdbFrames = <List<String>>[];
+    ui.set('sdb_status', {'text': 'ran clean   =>   ' + sdbResult + '     (Inspect result to explore it)'});
+    ui.set('sdb_stack', {'rows': 0});
+  } else {
+    sdbError = r.length > 1 ? r[1].toString() : 'error';
+    sdbFrames = _stFramePairs((r.length > 2 && r[2] is List) ? r[2] : <dynamic>[]);
+    sdbResult = '';
+    var head = sdbError.split('\n')[0];
+    ui.set('sdb_status', {'text': 'RAISED:   ' + head + '     (' + sdbFrames.length.toString() + ' Smalltalk frames)'});
+    ui.set('sdb_stack', {'rows': sdbFrames.length});
+  }
+  sdbSel = -1;
+  _showStFrame(-1);
+  ui.commit();
+}
+
+Future debugStRun(String expr) {
+  sdbExprText = expr;
+  return ask('stdebug', expr).then(_renderStDebug);
+}
+
+void buildStDebug() {
+  var W = paneW, H = paneH;
+  ui.label('sdb_lbl',
+      text: 'Smalltalk debugger   -   run an expression; on error see the call stack (post-mortem). Inspect result opens it in the Inspector.',
+      frame: <int>[12, 36, W - 24, 18]); track('sdb_lbl');
+  ui.field('sdb_expr', text: sdbExprText, frame: <int>[12, 60, W - 320, 24]); track('sdb_expr');
+  ui.button('sdb_go', title: 'Run', frame: <int>[W - 300, 58, 92, 28],
+      onClick: () => debugStRun(ui.textOf('sdb_expr'))); track('sdb_go');
+  ui.button('sdb_insp', title: 'Inspect result', frame: <int>[W - 204, 58, 172, 28],
+      onClick: () { switchTab(10); doInspect(ui.textOf('sdb_expr')); }); track('sdb_insp');
+  ui.label('sdb_status', text: 'run an expression to debug it', frame: <int>[12, 90, W - 24, 18]); track('sdb_status');
+  var top = 132, listW = (W - 36) ~/ 2, bodyH = H - top - 16;
+  ui.label('sdb_sl', text: 'call stack  (top frame first — where it raised)', frame: <int>[12, top - 20, listW, 18]); track('sdb_sl');
+  ui.list('sdb_stack', frame: <int>[12, top, listW, bodyH],
+      rowCount: () => sdbFrames.length,
+      cellAt: (r) => r >= 0 && r < sdbFrames.length ? sdbFrames[r][0] : '',
+      onSelect: (r) => _showStFrame(r)); track('sdb_stack');
+  ui.label('sdb_dl', text: 'detail', frame: <int>[12 + listW + 12, top - 20, W - 24 - listW - 12, 18]); track('sdb_dl');
+  ui.editor('sdb_detail', frame: <int>[12 + listW + 12, top, W - 24 - listW - 12, bodyH]); track('sdb_detail');
+  ui.commit();
+  _showStFrame(sdbSel);
+}
+
 void buildTab(int i) {
   if (activeTab == 9 && i != 9) stopGame();   // leaving the Game tab -> stop the game isolate
   activeTab = i;
@@ -1740,6 +1850,7 @@ void buildTab(int i) {
     case 8: buildHelp(); break;
     case 9: buildGame(); break;
     case 10: buildInspect(); break;
+    case 11: buildStDebug(); break;
     default: buildPlaceholder(i); break;
   }
   ui.commit();
