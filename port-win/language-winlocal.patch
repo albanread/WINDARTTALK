@@ -1,25 +1,107 @@
-diff --git a/workspace/language.dart b/workspace/language.dart
-index b42c7e2..94908ab 100644
 --- a/workspace/language.dart
 +++ b/workspace/language.dart
-@@ -1150,6 +1150,7 @@ main(List args, SendPort uiPort) {
-       else if (cmd == 'inspect') out = _inspect(arg.toString());
-       else if (cmd == 'inspectivar') out = _inspectIvar(arg.toString());
-       else if (cmd == 'inspectback') out = _inspectBack();
+@@ -418,6 +418,8 @@
+   // former one-shot "FFT" entry — one identifier, used everywhere.
+   {'name': 'FFT', 'cls': 'FftScope', 'sel': 'launch',
+    'blurb': 'a live 60fps spectrum analyzer, steer a tone with ←/→ (61b_fftscope.mst)'},
++  {'name': 'Galaxigans', 'cls': 'Galaxigans', 'sel': 'launch', 'size': <int>[640, 360],
++   'blurb': 'the x64-assembler arcade shooter, rewritten in Smalltalk (demos/galaxigans.mst)'},
+ ];
+ 
+ ReceivePort _stGameTick;               // the pull-tick port while a game runs
+@@ -1435,6 +1437,10 @@
+       else if (cmd == 'sndlist') out = _sheetList('isSoundSheet [ ^true ]');
+       else if (cmd == 'sndload') out = _soundSheetLoad(arg.toString());
+       else if (cmd == 'sthaltarm') out = stHaltArm(arg);
++      else if (cmd == 'inspect') out = _inspect(arg.toString());
++      else if (cmd == 'inspectivar') out = _inspectIvar(arg.toString());
++      else if (cmd == 'inspectback') out = _inspectBack();
 +      else if (cmd == 'stdebug') out = _stDebug(arg.toString());
        else if (cmd == 'ping') out = 'lang-pong';
        else out = 'ERR: unknown ' + cmd.toString();
      } catch (e) {
-@@ -1292,6 +1293,27 @@ _inspectBack() {
-   return _inspStructOf(_inspStack.last);
+@@ -1497,6 +1503,99 @@
+   }
  }
  
-+// windart C6: run an ST expression and report its outcome + call stack. ST
-+// compiles to Dart IL, so a caught exception's stack trace frames ARE the ST
-+// methods that were executing. On success the result is left inspectable (the
-+// debugger can hand off to the inspector). Returns:
-+//   [ 'ok',  printString ]                 — ran clean
-+//   [ 'err', message, [ frame, ... ] ]     — raised; frames top-of-stack first
++// --- windart C6: object inspector -------------------------------------------
++// Reflects a LIVE ST object here in the language isolate; only a flat string
++// view crosses the wire: [ className, printString, [ [ivarName, valuePrint], ... ] ].
++// `inspect <expr>` RETAINS the object (_inspStack) so drilling navigates the same
++// graph. instVarAt: is full super-chain-first layout but instVarNamesOf is a
++// class's OWN fields only, so walk Object..class super-first to align them.
++List<dynamic> _inspStack = <dynamic>[];
++
++List<String> _allIvarNames(cls) {
++  var chain = <dynamic>[];
++  var c = cls;
++  while (c != null) { chain.add(c); c = stSuperclassOf(c); }
++  var names = <String>[];
++  for (var i = chain.length - 1; i >= 0; i--) {
++    var own = stInstVarNamesOf(chain[i]);
++    if (own is List) { for (var n in own) names.add(n.toString()); }
++  }
++  return names;
++}
++
++List _inspStructOf(v) {
++  if (v == null) return <dynamic>['UndefinedObject', 'nil', <dynamic>[]];
++  var cname, pstr;
++  try { cname = stClassNameOf(stClassOf(v)).toString(); } catch (e) { cname = '?'; }
++  try { pstr = stPrintOf(v).toString(); } catch (e) { pstr = '<printString failed>'; }
++  var ivars = <dynamic>[];
++  try {
++    var names = _allIvarNames(stClassOf(v));
++    for (var i = 0; i < names.length; i++) {
++      var vp;
++      try {
++        var val = stInstVarAt(v, i + 1);
++        vp = val == null ? 'nil' : stPrintOf(val).toString();
++      } catch (e) { vp = '<unreadable>'; }
++      ivars.add(<String>[names[i], vp]);
++    }
++  } catch (e) { /* value has no named ivars */ }
++  return <dynamic>[cname, pstr, ivars];
++}
++
++_inspEvalObj(String code) {
++  var n = ++_stDoitN;
++  var cls = 'STInsp' + n.toString();
++  var src = 'Object subclass: ' + cls + ' [ ' + cls +
++      ' class >> doIt [ ^ ( ' + code.trim() + ' ) ] ]';
++  var r = stLoad(src);
++  if (r.startsWith('ERR:')) throw r;
++  return stInvokeStatic(cls, 'doIt', <dynamic>[]);
++}
++
++_inspect(String expr) {
++  try {
++    var v = _inspEvalObj(expr);
++    _inspStack = <dynamic>[v];
++    return _inspStructOf(v);
++  } catch (e) { return 'ERR: ' + e.toString(); }
++}
++
++_inspectIvar(String indexStr) {
++  if (_inspStack.isEmpty) return 'ERR: nothing is being inspected';
++  var idx = int.parse(indexStr.trim(), onError: (_) => -1);
++  if (idx < 1) return 'ERR: bad instVar index ' + indexStr;
++  try {
++    var child = stInstVarAt(_inspStack.last, idx);
++    _inspStack.add(child);
++    return _inspStructOf(child);
++  } catch (e) { return 'ERR: ' + e.toString(); }
++}
++
++_inspectBack() {
++  if (_inspStack.length > 1) _inspStack.removeLast();
++  if (_inspStack.isEmpty) return <dynamic>['nil', 'nil', <dynamic>[]];
++  return _inspStructOf(_inspStack.last);
++}
++
++// windart C6: run an ST expression and report outcome + call stack. ST compiles
++// to Dart IL, so a caught exception's frames ARE the ST methods.
++//   [ 'ok', printString ]   OR   [ 'err', message, [ frame, ... ] ]
 +_stDebug(String code) {
 +  try {
 +    var v = _inspEvalObj(code);

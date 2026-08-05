@@ -427,12 +427,17 @@ void spawnLanguage() {
 Set<String> _stClasses = new Set<String>();
 bool _stWorldLoaded = false;
 const String _stWorldDir = r'e:\windart-talk\MACDARTV1\macdart\st\world';
+const String _stGalaxigans = r'e:\windart-talk\demos\galaxigans.mst';
 
 void _loadStWorld() {
   if (_stWorldLoaded || _lang == null) return;
   _stWorldLoaded = true;
   ask('stimport', _stWorldDir).then((imp) {
     print('ST-WORLD: ' + imp.toString());
+    // Galaxigans — the x64-assembler arcade shooter, rewritten in Smalltalk. A
+    // filed-in game: import it AFTER the world it needs (GamePane, Sound), then
+    // enumerate classes so it is browsable + launchable.
+    ask('stimport', _stGalaxigans).then((gx) => print('ST-GAME galaxigans: ' + gx.toString()));
     ask('classes', '').then((raw) {
       var names =
           (raw is List) ? raw.map((e) => e.toString()).toList() : <String>[];

@@ -95,6 +95,46 @@ String _stReloadAll() {
 // numbered world stems keep their boot order). The slicing comes from the
 // parse-only stOutline native; chunks start at an item's line and run to the
 // next item's, so leading comments travel with what they describe.
+/// The vendored Smalltalk world, handed over by the UI isolate at spawn — this
+/// isolate runs from a mutable copy in /tmp, so it cannot resolve it itself.
+String _stWorldDir;
+String _worldDir() {
+  if (_stWorldDir == null) return null;
+  return new Directory(_stWorldDir).existsSync() ? _stWorldDir : null;
+}
+
+/// The image's world must not silently lag the FILES. It carries a signature
+/// (file count + total bytes, written by _stImport); when the vendored world no
+/// longer matches it, re-import.
+///
+/// This used to live only in start-st-gui.sh, so an image started any other way
+/// — start-gui.sh, which is the documented launcher — kept whatever world it had
+/// forever. Editing a world file then produced a failure far from the cause: a
+/// method the file defines is simply absent, and the first symptom is
+/// "NoSuchMethodError: 'play' was called on null" from a game that asked the
+/// image for something the file has and the image does not.
+void _refreshStaleWorld() {
+  var dir = _worldDir();
+  if (dir == null) return;
+  var files = <String>[];
+  for (var f in new Directory(dir).listSync()) {
+    if (f.path.endsWith('.mst')) files.add(f.path);
+  }
+  if (files.isEmpty) return;
+  var bytes = 0;
+  for (var f in files) bytes += new File(f).lengthSync();
+  var want = files.length.toString() + '-' + bytes.toString();
+  var have = '';
+  try {
+    var rows = _db.query("SELECT value FROM meta WHERE key='stworld_sig'");
+    if (rows.isNotEmpty) have = rows[0][0].toString();
+  } catch (e) { return; }          // no meta table: no world imported yet
+  if (have.isEmpty || have == want) return;
+  var r = _stImport(dir);
+  _ui.send(<dynamic>['tr',
+      'st: image world was stale (' + have + ' -> ' + want + ') — ' + r]);
+}
+
 String _stImport(String path) {
   var files = <String>[];
   if (FileSystemEntity.isDirectorySync(path)) {
@@ -140,9 +180,23 @@ String _stImport(String path) {
           classText[name] = buf;
           classNames.add(name);
           classCat[name] = _worldCategoryOf(stem);  // system category
+          // A file that only REOPENS a class (`Foo >> sel [ … ]`) must extend
+          // what the image already holds, not replace it. Importing one
+          // overlay file on its own — 80_gamepane_wiring.mst, say — used to
+          // rewrite GamePane's whole declaration to just that file's methods,
+          // silently deleting defineSprite:/onStep:/keyHeld: from the image and
+          // leaving the class broken until the whole world was re-imported.
+          // Seed the buffer with the existing declaration instead.
+          if (type != 'class' && _decls.containsKey(name)) {
+            buf.write(_decls[name]);
+            buf.write('\n');
+          }
         } else {
           buf.write('\n\n"— from ' + stem + ' —"\n');
         }
+        // Re-importing an unchanged overlay must not stack another copy of the
+        // same methods onto the declaration.
+        if (buf.toString().contains(chunk)) continue;
         buf.write(chunk);
       } else {
         // vardecl / stmt — the file's init & driver lines, kept in order.
@@ -364,6 +418,8 @@ final List<Map> _kStGames = <Map>[
   // former one-shot "FFT" entry — one identifier, used everywhere.
   {'name': 'FFT', 'cls': 'FftScope', 'sel': 'launch',
    'blurb': 'a live 60fps spectrum analyzer, steer a tone with ←/→ (61b_fftscope.mst)'},
+  {'name': 'Galaxigans', 'cls': 'Galaxigans', 'sel': 'launch', 'size': <int>[640, 360],
+   'blurb': 'the x64-assembler arcade shooter, rewritten in Smalltalk (demos/galaxigans.mst)'},
 ];
 
 ReceivePort _stGameTick;               // the pull-tick port while a game runs
@@ -385,6 +441,7 @@ int _stGameMask(List keycodes) {
 }
 
 void _stGameCleanup() {
+  _gpResetStepper();          // a parked stepper must never outlive its game
   if (_stGameTick != null) { _stGameTick.close(); _stGameTick = null; }
   // Fire the game's onReset: block and clear StepBlock/Keys, then the wire.
   try { stInvokeStatic('GamePane', 'reset', []); } catch (e) {}
@@ -397,6 +454,19 @@ void _stGameCleanup() {
 // instead — fall back to that class directly, `launch` being the one
 // selector both shipped games already use, so any class following that
 // convention just plays without ever touching this table.
+/// A game's own idea of its pane, via class-side paneWidth/paneHeight; the
+/// two originals' 320x240 when it does not say.
+List _stGameAsksSize(String cls) {
+  try {
+    var w = stInvokeStatic(cls, 'paneWidth', []);
+    var h = stInvokeStatic(cls, 'paneHeight', []);
+    if (w is int && h is int && w >= 32 && h >= 32 && w <= 2048 && h <= 2048) {
+      return <int>[w, h];
+    }
+  } catch (e) {}                    // no such method: it takes the default
+  return <int>[_kStGameW, _kStGameH];
+}
+
 _stGame(String arg) {
   var name = arg.trim().split(' ')[0];
   Map game = null;
@@ -420,6 +490,7 @@ _stGame(String arg) {
     return 'ERR ' + name + ' never sent GamePane>>run';
   }
   var setup = stGpTake();
+  _gpResetStepper();          // frame 0, free-running, real keyboard
   _stGameTick = new ReceivePort();
   _stGameTick.listen(_stGameOnTick);
   _ui.send(<dynamic>['port', _stGameTick.sendPort]);
@@ -429,32 +500,146 @@ _stGame(String arg) {
   // 'world': [w, h] opens an indexed pane LARGER than the viewport (default
   // world == viewport, i.e. no scrollable margin at all) — needed for
   // scrollTo:y: (world/84_gamepane_buffers.mst) to have anywhere to pan into.
-  List world = (game['world'] is List) ? game['world'] : [_kStGameW, _kStGameH];
+  // 'size': [w, h] — the VIEWPORT, for a game that wants more room than the
+  // two originals' 320x240. It is still a logical pane the layer blows up with
+  // a nearest filter, so this buys pixels, not smoothing.
+  //
+  // A game FILED IN from demos/ has no row in the table at all, so it declares
+  // its own: class-side paneWidth/paneHeight, asked for here. That keeps the
+  // resolution with the game (Galaxigans wants its original's 640x360) instead
+  // of in a table the game's author cannot see.
+  List size = (game['size'] is List) ? game['size'] : _stGameAsksSize(game['cls']);
+  int vw = size[0], vh = size[1];
+  List world = (game['world'] is List) ? game['world'] : [vw, vh];
   var first = (game['direct'] == true)
-      ? <List>[<dynamic>['gpopen', _kStGameW, _kStGameH, _kStGameW, _kStGameH, 1]]
-      : <List>[<dynamic>['gpopen', _kStGameW, _kStGameH, world[0], world[1]]];
+      ? <List>[<dynamic>['gpopen', vw, vh, vw, vh, 1]]
+      : <List>[<dynamic>['gpopen', vw, vh, world[0], world[1]]];
   for (var c in setup) first.add(c);
   _ui.send(<dynamic>['draw', first]);  // gpopen is SETUP, not a frame
   return 'ok';
 }
 
-// One UI tick: keystate in, one stepped frame out.
-void _stGameOnTick(gs) {
-  if (_stGameTick == null) return;     // stopped between ticks
-  var keys = (gs is List && gs.isNotEmpty && gs[0] is List)
-      ? gs[0] as List : const [];
+// --- frame stepping (the Tcl-driven stepper) --------------------------------
+// A game's whole frame is ONE `GamePane stepWithKeys:` call, invited by the UI
+// timer ~33 times a second. That makes a frame-granularity debugger nearly
+// free: gate the invitation, and the loop stops between frames with everything
+// — the pane, the image, the running game object — still live and inspectable.
+// No breakpoints, no stack surgery, no pausing the isolate: while parked we
+// simply decline to step, so the control plane stays as responsive as ever and
+// `doit` can read (or poke) the game between frames.
+//
+// End-of-frame and start-of-frame are the SAME instant here, because nothing
+// runs between the last statement of frame N and the first of frame N+1 — so
+// one park point serves both readings. Look at what the frame produced with
+// `gpwhere` / `doit` / `gpsnap` (that is the end of N); set up what the next
+// one will see with `gpkeys` and `doit` (that is the start of N+1).
+bool _gpParked = false;      // parked between frames?
+int _gpFrameNo = 0;          // frames stepped since this game started
+int _gpLastOps = 0;          // draw ops the last stepped frame produced
+int _gpKeys = -1;            // injected key mask (-1 = the real keyboard)
+
+/// Frame counters belong to a RUN, not to the driver — a new game starts at 0.
+/// Parking does not survive either: a game you launch always plays.
+void _gpResetStepper() {
+  _gpParked = false; _gpFrameNo = 0; _gpLastOps = 0; _gpKeys = -1;
+}
+
+String _gpWhere() {
+  if (_stGameTick == null) return 'no game running';
+  var b = new StringBuffer();
+  b.write(_gpParked ? 'parked' : 'running');
+  b.write(' frame ');
+  b.write(_gpFrameNo);
+  b.write(' ops ');
+  b.write(_gpLastOps);
+  b.write(_gpKeys >= 0 ? (' keys ' + _gpKeys.toString()) : ' keys live');
+  return b.toString();
+}
+
+/// ONE frame: step the game, ship what it drew. The single place a frame
+/// happens — the UI tick and the stepper both come through here, so a stepped
+/// frame is not a different kind of frame, it is the same one taken by hand.
+/// Answers false if the game ended (and has been cleaned up).
+bool _gpOneFrame(int mask) {
   try {
-    stInvokeStatic('GamePane', 'stepWithKeys:', [_stGameMask(keys)]);
+    stInvokeStatic('GamePane', 'stepWithKeys:', [mask]);
   } catch (e) {
     _ui.send(<dynamic>['done', 'ST game error: ' + e.toString()]);
     _stGameCleanup();
-    return;
+    return false;
   }
-  _ui.send(<dynamic>['draw', stGpTake()]);
+  var ops = stGpTake();
+  _gpFrameNo++;
+  _gpLastOps = ops is List ? ops.length : 0;
+  _ui.send(<dynamic>['draw', ops]);
   if (!stGpIsRunning()) {              // the game sent GamePane>>stop
     _ui.send(<dynamic>['done', 'game over']);
     _stGameCleanup();
+    return false;
   }
+  return true;
+}
+
+/// `gpstep [n]` — park, then take n frames (default 1) RIGHT NOW and answer
+/// where that left the game. Deliberately not "let the timer deliver n frames":
+/// a stepper you have to wait 30ms a frame for is useless for scripting, and
+/// waiting would also mean the reply could not describe the result. Stepping
+/// 600 frames to reach the next attract flip is instant.
+String _gpStep(String arg) {
+  if (_stGameTick == null) return 'ERR no game running';
+  var n = int.parse(arg.trim(), onError: (_) => 1);
+  if (n < 1) n = 1;
+  _gpParked = true;                       // the UI tick keeps its hands off
+  var keys = _gpKeys >= 0 ? _gpKeys : 0;  // stepping is keyboard-free; see gpkeys
+  for (var i = 0; i < n; i++) {
+    if (!_gpOneFrame(keys)) return 'game ended at frame ' + _gpFrameNo.toString();
+  }
+  return _gpWhere();
+}
+
+String _gpPause() {
+  if (_stGameTick == null) return 'ERR no game running';
+  _gpParked = true;
+  return _gpWhere();
+}
+
+String _gpRun() {
+  if (_stGameTick == null) return 'ERR no game running';
+  _gpParked = false;
+  return _gpWhere();
+}
+
+/// `gpkeys <mask>` — what the next stepped frames see instead of the keyboard
+/// (bits: left 1, right 2, up 4, down 8, A 16, B 32), or `-` to hand control
+/// back. This is the "act at the start of the frame" half of the stepper: hold
+/// fire for one frame and watch exactly what that frame does with it.
+String _gpKeysCmd(String arg) {
+  var s = arg.trim();
+  if (s.isEmpty || s == '-' || s == 'off') { _gpKeys = -1; return 'keys: keyboard'; }
+  var v = int.parse(s, onError: (_) => -1);
+  if (v < 0) return 'ERR gpkeys <mask 0..63 | ->';
+  _gpKeys = v;
+  return 'keys: ' + v.toString();
+}
+
+// One UI tick: keystate in, one stepped frame out — unless the stepper has the
+// loop parked, in which case the tick is declined and the game simply waits.
+void _stGameOnTick(gs) {
+  if (_stGameTick == null) return;     // stopped between ticks
+  if (_gpParked) {
+    // Parked: step nothing, but STILL answer the invitation. The UI schedules
+    // the next tick from inside the paint it does for this one, so a tick that
+    // goes unanswered ends the pull loop for good — park by declining silently
+    // and `gprun` would resume a game nobody was inviting any more. An empty
+    // batch applies no ops and re-presents the frame we stopped on (the native
+    // begin_frame only opens a command buffer; it does not clear), so the pane
+    // holds its picture and the pump stays primed.
+    _ui.send(<dynamic>['draw', const []]);
+    return;
+  }
+  var keys = (gs is List && gs.isNotEmpty && gs[0] is List)
+      ? gs[0] as List : const [];
+  _gpOneFrame(_gpKeys >= 0 ? _gpKeys : _stGameMask(keys));
 }
 
 _stGameStop(String arg) { _stGameCleanup(); return 'ok'; }
@@ -796,6 +981,7 @@ String _hostCall(String verb, List args) {
   if (verb == 'removeMethod') return _hostRemoveMethod(args[0].toString(), args[1].toString(), args[2].toString());
   if (verb == 'newClass') return _hostAcceptWhole(args[0].toString(), 'created');
   if (verb == 'acceptClass') return _hostAcceptWhole(args[0].toString(), 'accepted');
+  if (verb == 'storeClass') return _hostStoreClass(args[0].toString());
   if (verb == 'setComment') return _hostSetComment(args[0].toString(), args[1].toString());
   if (verb == 'removeClass') {
     var r = _remove(args[0].toString());
@@ -877,6 +1063,90 @@ String _hostAcceptWhole(String text, String what) {
   var err = _acceptOne(text.trim());
   if (err.isNotEmpty) return 'ERR ' + err;
   return 'OK ' + what + ' ' + name.toString();
+}
+
+// Persist a GENERATED class without hot-reloading the running world — the
+// accept path a program uses to save its own data, as opposed to the Browser's
+// accept, which a human drives between frames.
+//
+// _acceptMany reloads EVERY world class (stLoadFresh, so an edit always wins).
+// That is right for an editor and wrong for a program saving from inside a
+// callback: the reload re-inits class-side state, and the casualty is GamePane's
+// StepBlock — the class variable holding the per-frame closure. The GUI's frame
+// timer keeps calling GamePane stepWithKeys:, but with StepBlock nil every tick
+// is a no-op, so the game freezes on the frame that saved and never resumes
+// (galaxigans' hall of fame: "the high-score page never ends"). The game cannot
+// re-arm itself either — a running method's globals are already bound to the
+// pre-reload class, while the driver resolves GamePane by name and gets the new
+// one, so they write and read different variables.
+//
+// So: same parse-check and the same image write (it boots live next time), but
+// only THIS class is made live, via a plain stLoad. Nothing else in the world is
+// touched, and a loop running underneath it keeps running.
+// Regression: st/test/galaxigans_reload_wire.dart.
+// --- sprite sheets (SPRITE_EDITOR_PLAN.md) -----------------------------------
+// A sheet is an ordinary st-class decl whose source carries the editor's
+// discovery marker. Listing greps the source; loading asks the LIVE class for
+// its literals (stInvokeStatic, so a sheet edited in the Browser answers its
+// edited art) and ships plain lists back over the port.
+
+List _sheetList(String marker) {
+  var names = <String>[];
+  _decls.forEach((n, s) {
+    if (_kindOf(s) == 'st-class' && s.contains(marker)) names.add(n);
+  });
+  names.sort();
+  return names;
+}
+
+List _spriteSheetList() => _sheetList('isSpriteSheet [ ^true ]');
+
+dynamic _soundSheetLoad(String name) {
+  if (!_decls.containsKey(name)) return 'ERR: no class ' + name;
+  try {
+    var pl = stInvokeStatic(name, 'params', []);
+    if (pl is! List) return 'ERR: ' + name + ' is not a sound sheet';
+    var params = <num>[];
+    for (var v in (pl as List)) { params.add(v as num); }
+    return <dynamic>[name, params];
+  } catch (e) {
+    return 'ERR: ' + e.toString();
+  }
+}
+
+dynamic _spriteSheetLoad(String name) {
+  if (!_decls.containsKey(name)) return 'ERR: no class ' + name;
+  try {
+    var fr = stInvokeStatic(name, 'frames', []);
+    var pl = stInvokeStatic(name, 'palette', []);
+    if (fr is! List || pl is! List) return 'ERR: ' + name + ' is not a sheet';
+    var rows = <String>[];
+    for (var r in (fr as List)) { rows.add(r.toString()); }
+    var pal = <List<int>>[];
+    for (var p in (pl as List)) {
+      var l = p as List;
+      pal.add(<int>[(l[0] as num).toInt(), (l[1] as num).toInt(),
+                    (l[2] as num).toInt()]);
+    }
+    return <dynamic>[name, rows, pal];
+  } catch (e) {
+    return 'ERR: ' + e.toString();
+  }
+}
+
+String _hostStoreClass(String text) {
+  var s = text.trim();
+  if (!_isStAny(s)) return 'ERR storeClass takes a Smalltalk class';
+  var c = stCheck(s);                       // refused source never reaches the image
+  if (c.isNotEmpty) return 'ERR ' + c;
+  var name = _declName(s);
+  if (name == null) return 'ERR storeClass: no class name';
+  var r = stLoad(s);                        // live NOW, this class only
+  if (r.toString().startsWith('ERR')) return 'ERR ' + r.toString();
+  _decls[name] = s;
+  _recordVersion(name, 'store');
+  _imageUpsert(name, s);                    // and live at the next boot
+  return 'OK stored ' + name.toString();
 }
 
 String _hostSaveMethod(String cls, String side, String text) {
@@ -1044,6 +1314,7 @@ main(List args, SendPort uiPort) {
   // read-only real-source view of dart:core / dart:cocoa / …
   if (args.length > 2 && args[2] != null) _sdkLibDir = args[2].toString();
   if (args.length > 3 && args[3] != null) _cocoaSrcPath = args[3].toString();
+  if (args.length > 4 && args[4] != null) _stWorldDir = args[4].toString();
   if (args.length > 1 && args[1] != null && (args[1] as String).length > 0) {
     _db = new Db.open(args[1]);
     if (_db.isOpen) {
@@ -1058,6 +1329,7 @@ main(List args, SendPort uiPort) {
           '(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, label TEXT,'
           ' name TEXT, existed INTEGER, kind TEXT, category TEXT, source TEXT)');
       _loadFromImage();
+      _refreshStaleWorld();
     }
   }
   var rp = new ReceivePort();
@@ -1146,6 +1418,24 @@ main(List args, SendPort uiPort) {
       else if (cmd == 'stgame') out = _stGame(arg.toString());
       else if (cmd == 'stgamestop') out = _stGameStop(arg.toString());
       else if (cmd == 'stgames') out = _stGameList();
+      // the frame stepper — a game is a loop of discrete frames, so these are
+      // the whole debugger it needs: park it, take frames one at a time, and
+      // read (or poke) the world between them with the ordinary `doit`.
+      else if (cmd == 'gpstep') out = _gpStep(arg.toString());
+      else if (cmd == 'gppause') out = _gpPause();
+      else if (cmd == 'gprun') out = _gpRun();
+      else if (cmd == 'gpwhere') out = _gpWhere();
+      else if (cmd == 'gpkeys') out = _gpKeysCmd(arg.toString());
+      // The sprite editor's persistence (SPRITE_EDITOR_PLAN.md). spstore is
+      // the STORE path — the same _hostStoreClass a program's own save uses:
+      // parse-check, image write, ONE class made live, no world reload.
+      else if (cmd == 'spstore') out = _hostStoreClass(arg.toString());
+      else if (cmd == 'splist') out = _spriteSheetList();
+      else if (cmd == 'spload') out = _spriteSheetLoad(arg.toString());
+      // The sound editor's persistence — the same store path + markers.
+      else if (cmd == 'sndstore') out = _hostStoreClass(arg.toString());
+      else if (cmd == 'sndlist') out = _sheetList('isSoundSheet [ ^true ]');
+      else if (cmd == 'sndload') out = _soundSheetLoad(arg.toString());
       else if (cmd == 'sthaltarm') out = stHaltArm(arg);
       else if (cmd == 'inspect') out = _inspect(arg.toString());
       else if (cmd == 'inspectivar') out = _inspectIvar(arg.toString());
@@ -1214,14 +1504,11 @@ String _stDoit(String code) {
 }
 
 // --- windart C6: object inspector -------------------------------------------
-// The dartui Inspector reflects a LIVE ST object, and ST objects live in THIS
-// isolate — so the reflection runs here and only a flat, string-only view goes
-// over the wire:  [ className, printString, [ [ivarName, valuePrint], ... ] ].
-// `inspect <expr>` RETAINS the evaluated object (in _inspStack) so drilling into
-// an instance variable navigates the same object graph, not a fresh evaluation.
-// HAZARD: instVarAt: indexes the full super-chain-first layout, but
-// instVarNamesOf answers only a class's OWN fields — so walk Object..class
-// super-first to line the names up with the slots.
+// Reflects a LIVE ST object here in the language isolate; only a flat string
+// view crosses the wire: [ className, printString, [ [ivarName, valuePrint], ... ] ].
+// `inspect <expr>` RETAINS the object (_inspStack) so drilling navigates the same
+// graph. instVarAt: is full super-chain-first layout but instVarNamesOf is a
+// class's OWN fields only, so walk Object..class super-first to align them.
 List<dynamic> _inspStack = <dynamic>[];
 
 List<String> _allIvarNames(cls) {
@@ -1229,7 +1516,7 @@ List<String> _allIvarNames(cls) {
   var c = cls;
   while (c != null) { chain.add(c); c = stSuperclassOf(c); }
   var names = <String>[];
-  for (var i = chain.length - 1; i >= 0; i--) {   // Object first, class last
+  for (var i = chain.length - 1; i >= 0; i--) {
     var own = stInstVarNamesOf(chain[i]);
     if (own is List) { for (var n in own) names.add(n.toString()); }
   }
@@ -1247,17 +1534,15 @@ List _inspStructOf(v) {
     for (var i = 0; i < names.length; i++) {
       var vp;
       try {
-        var val = stInstVarAt(v, i + 1);   // 1-based, super-chain-first
+        var val = stInstVarAt(v, i + 1);
         vp = val == null ? 'nil' : stPrintOf(val).toString();
       } catch (e) { vp = '<unreadable>'; }
       ivars.add(<String>[names[i], vp]);
     }
-  } catch (e) { /* value has no named ivars (SmallInteger, String, Symbol...) */ }
+  } catch (e) { /* value has no named ivars */ }
   return <dynamic>[cname, pstr, ivars];
 }
 
-// Evaluate an ST expression to its OBJECT (not printString) — the single-expr
-// core of _stDoit, kept separate so the inspector can retain the result.
 _inspEvalObj(String code) {
   var n = ++_stDoitN;
   var cls = 'STInsp' + n.toString();
@@ -1278,7 +1563,7 @@ _inspect(String expr) {
 
 _inspectIvar(String indexStr) {
   if (_inspStack.isEmpty) return 'ERR: nothing is being inspected';
-  var idx = int.parse(indexStr.trim(), onError: (_) => -1);   // 1-based
+  var idx = int.parse(indexStr.trim(), onError: (_) => -1);
   if (idx < 1) return 'ERR: bad instVar index ' + indexStr;
   try {
     var child = stInstVarAt(_inspStack.last, idx);
@@ -1293,12 +1578,9 @@ _inspectBack() {
   return _inspStructOf(_inspStack.last);
 }
 
-// windart C6: run an ST expression and report its outcome + call stack. ST
-// compiles to Dart IL, so a caught exception's stack trace frames ARE the ST
-// methods that were executing. On success the result is left inspectable (the
-// debugger can hand off to the inspector). Returns:
-//   [ 'ok',  printString ]                 — ran clean
-//   [ 'err', message, [ frame, ... ] ]     — raised; frames top-of-stack first
+// windart C6: run an ST expression and report outcome + call stack. ST compiles
+// to Dart IL, so a caught exception's frames ARE the ST methods.
+//   [ 'ok', printString ]   OR   [ 'err', message, [ frame, ... ] ]
 _stDebug(String code) {
   try {
     var v = _inspEvalObj(code);
