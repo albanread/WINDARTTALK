@@ -1,0 +1,7 @@
+Object subclass: RollingHello [
+    build: ui [
+        ui label: 'g' text: 'I was loaded at runtime — the rolling catalog works!' frame: #(20 44 470 24).
+        ui button: 'b' title: 'Rolling button (Smalltalk)' frame: #(20 84 240 30) onClick: [:e |
+            ui label: 'g' text: 'Clicked — a just-loaded app running live.' frame: #(20 44 470 24) ]
+    ]
+]

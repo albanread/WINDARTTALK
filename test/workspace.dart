@@ -69,7 +69,7 @@ int paneH = 712;
 List<String> content = <String>[];        // ids of the current tab's content widgets
 Set<String> persistentWidgets = <String>{};  // widgets that survive a tab switch (tab strip etc.)
 StringBuffer wsLog = new StringBuffer();
-final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help','Game','Inspect','ST Debug'];
+final tabNames = const ['Workspace','Browser','Editor','Find','Docs','App','Debug','VM','Help','Game','Inspect','ST Debug','Catalog'];
 
 Map<String, ClassMirror> classMirrors = <String, ClassMirror>{};
 List<String> classNames = <String>[];
@@ -633,6 +633,22 @@ Future<String> handle(String line) async {
     case 'ufindopen':
       openFindResult(int.parse(arg.trim(), onError: (_) => -1));
       return 'opened ' + arg.trim();
+    case 'ucatalog':                       // open + refresh the Catalog tab
+      if (activeTab != 12) switchTab(12); else await _catRefresh();
+      return 'catalog: ' + catApps.length.toString() + ' apps, ' + catGames.length.toString() + ' games, ' + catDemos.length.toString() + ' demos';
+    case 'ucatload':                       // rolling: import an .mst, refresh
+      if (activeTab != 12) switchTab(12);
+      ui.set('cat_path', {'text': arg.trim()}); ui.commit();
+      await _catLoad(arg.trim());
+      return 'loaded -> ' + catApps.length.toString() + ' apps, ' + catGames.length.toString() + ' games';
+    case 'ucatapp':
+      _catRunApp(catApps.indexOf(arg.trim()));
+      return 'run app ' + arg.trim();
+    case 'ucatgame':
+      var gi = -1;
+      for (var i = 0; i < catGames.length; i++) { if (catGames[i][0] == arg.trim()) { gi = i; break; } }
+      _catRunGame(gi);
+      return 'run game ' + arg.trim();
     default:
       if (_lang == null) return '(language isolate not ready)';
       return (await ask(verb, arg)).toString();
@@ -1893,6 +1909,107 @@ void buildStDebug() {
   _showStFrame(sdbSel);
 }
 
+// ── Catalog tab (T12): the rolling app/game/demo gallery ──────────────────────
+// Enumerates every runnable class the image holds — apps (a `build:` method),
+// games, demos — and launches one on click. "Load .mst" imports a file into the
+// language isolate (stimport handles a single file), so dropping a new app/game
+// .mst here makes it APPEAR in the gallery — this is the "rolling support".
+List<String> catApps = <String>[];                       // apps -> plain class names
+List<List<String>> catGames = <List<String>>[], catDemos = <List<String>>[];  // [name, description]
+String catPathText = r'e:\windart-talk\MACDARTV1\macdart\st\world\81_appui.mst';
+
+List<String> _toStrList(x) => (x is List) ? x.map((e) => e.toString()).toList() : <String>[];
+// games/demos answer [name, description, file] tuples; keep name (launch key) + description.
+List<List<String>> _toPairList(x) {
+  var out = <List<String>>[];
+  if (x is List) {
+    for (var e in x) {
+      if (e is List && e.isNotEmpty) out.add(<String>[e[0].toString(), e.length > 1 ? e[1].toString() : '']);
+      else out.add(<String>[e.toString(), '']);
+    }
+  }
+  return out;
+}
+
+Future _catRefresh() async {
+  if (_lang == null) return;
+  catApps = _toStrList(await ask('apps', ''));
+  catGames = _toPairList(await ask('stgames', ''));
+  catDemos = _toPairList(await ask('stdemos', ''));
+  ui.set('cat_apps', {'rows': catApps.length});
+  ui.set('cat_games', {'rows': catGames.length});
+  ui.set('cat_demos', {'rows': catDemos.length});
+  ui.set('cat_al', {'text': 'Apps (${catApps.length})'});
+  ui.set('cat_gl', {'text': 'Games (${catGames.length})'});
+  ui.set('cat_dl', {'text': 'Demos (${catDemos.length})'});
+  ui.set('cat_status', {'text': 'catalog: ${catApps.length} apps, ${catGames.length} games, ${catDemos.length} demos   -   click an app or game to run it'});
+  ui.commit();
+}
+
+Future _catLoad(String path) async {
+  if (_lang == null || path.trim().isEmpty) return;
+  var r = await ask('stimport', path.trim());
+  var before = catApps.length + catGames.length;
+  // A freshly imported .mst adds classes — refresh the ST class set too so the
+  // browser and Find see them, then re-enumerate the gallery.
+  var names = _toStrList(await ask('classes', ''));
+  _stClasses = new Set<String>.from(names);
+  names.sort();
+  classesInLib['smalltalk'] = names;
+  for (var n in names) libOfClass[n] = 'smalltalk';
+  await _catRefresh();
+  var added = (catApps.length + catGames.length) - before;
+  ui.set('cat_status', {'text': 'loaded ' + path.trim() + '  ->  ' + r.toString() + '   (+' + added.toString() + ' runnable)'});
+  ui.commit();
+}
+
+void _catRunApp(int r) {
+  if (r < 0 || r >= catApps.length) return;
+  _appName = catApps[r];
+  switchTab(5);                                   // App pane
+  ui.set('app_status', {'text': 'running: $_appName'});
+  ui.commit();
+  if (_lang != null) ask('apprun', [_appName, paneW.toDouble(), paneH.toDouble()]);
+}
+
+void _catRunGame(int r) {
+  if (r < 0 || r >= catGames.length) return;
+  switchTab(9);                                   // Game pane
+  startStGame(catGames[r][0]);
+}
+
+void _catRunDemo(int r) {
+  if (r < 0 || r >= catDemos.length || _lang == null) return;
+  var name = catDemos[r][0];
+  ask('stdemo', name).then((res) {
+    ui.set('cat_status', {'text': 'demo ' + name + '  ->  ' + res.toString().split('\n')[0]});
+    ui.commit();
+  });
+}
+
+void buildCatalog() {
+  var W = paneW, H = paneH;
+  ui.label('cat_lbl', text: 'Catalog   -   click an app or game to run it. Load an .mst to add new ones (rolling support).', frame: <int>[12, 36, W - 24, 18]); track('cat_lbl');
+  ui.label('cat_pl', text: 'Load .mst:', frame: <int>[12, 62, 72, 20]); track('cat_pl');
+  ui.field('cat_path', text: catPathText, frame: <int>[86, 60, W - 320, 24]); track('cat_path');
+  ui.button('cat_load', title: 'Load', frame: <int>[W - 224, 58, 92, 28], onClick: () { _catLoad(ui.textOf('cat_path')); }); track('cat_load');
+  ui.button('cat_refresh', title: 'Refresh', frame: <int>[W - 124, 58, 92, 28], onClick: () { _catRefresh(); }); track('cat_refresh');
+  ui.label('cat_status', text: '(loading catalog...)', frame: <int>[12, 92, W - 24, 18]); track('cat_status');
+  var top = 138, colW = (W - 48) ~/ 3, bodyH = H - top - 16;
+  var x0 = 12, x1 = 12 + colW + 12, x2 = 12 + 2 * (colW + 12);
+  ui.label('cat_al', text: 'Apps', frame: <int>[x0, top - 20, colW, 18]); track('cat_al');
+  ui.list('cat_apps', frame: <int>[x0, top, colW, bodyH],
+      rowCount: () => catApps.length, cellAt: (r) => r < catApps.length ? catApps[r] : '', onSelect: _catRunApp); track('cat_apps');
+  ui.label('cat_gl', text: 'Games', frame: <int>[x1, top - 20, colW, 18]); track('cat_gl');
+  ui.list('cat_games', frame: <int>[x1, top, colW, bodyH],
+      rowCount: () => catGames.length, cellAt: (r) => r < catGames.length ? catGames[r][0] + '   —   ' + catGames[r][1] : '', onSelect: _catRunGame); track('cat_games');
+  ui.label('cat_dl', text: 'Demos', frame: <int>[x2, top - 20, colW, 18]); track('cat_dl');
+  ui.list('cat_demos', frame: <int>[x2, top, colW, bodyH],
+      rowCount: () => catDemos.length, cellAt: (r) => r < catDemos.length ? catDemos[r][0] + '   —   ' + catDemos[r][1] : '', onSelect: _catRunDemo); track('cat_demos');
+  ui.commit();
+  _catRefresh();
+}
+
 void buildTab(int i) {
   if (activeTab == 9 && i != 9) stopGame();   // leaving the Game tab -> stop the game isolate
   activeTab = i;
@@ -1910,6 +2027,7 @@ void buildTab(int i) {
     case 9: buildGame(); break;
     case 10: buildInspect(); break;
     case 11: buildStDebug(); break;
+    case 12: buildCatalog(); break;
     default: buildPlaceholder(i); break;
   }
   ui.commit();
