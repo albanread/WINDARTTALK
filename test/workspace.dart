@@ -620,6 +620,19 @@ Future<String> handle(String line) async {
     case 'usdbsel':
       _showStFrame(int.parse(arg.trim(), onError: (_) => -1));
       return 'frame ' + sdbSel.toString();
+    case 'ufind':                          // drive the Find tab (bilingual find)
+      if (activeTab != 3) switchTab(3);
+      ui.set('fd_q', {'text': arg.trim()}); ui.commit();
+      await doFind();
+      return 'find "' + arg.trim() + '" -> ' + findResults.length.toString() + ' matches';
+    case 'usenders':                       // drive the Find tab (senders)
+      if (activeTab != 3) switchTab(3);
+      ui.set('fd_q', {'text': arg.trim()}); ui.commit();
+      await doSenders();
+      return 'senders "' + arg.trim() + '" -> ' + findResults.length.toString() + ' classes';
+    case 'ufindopen':
+      openFindResult(int.parse(arg.trim(), onError: (_) => -1));
+      return 'opened ' + arg.trim();
     default:
       if (_lang == null) return '(language isolate not ready)';
       return (await ask(verb, arg)).toString();
@@ -1176,46 +1189,92 @@ void pushToolbarMetric() {
 }
 
 // ── Find tab (T2): substring over classes + members -> jump to Browser ────────
-List<String> findResults = <String>[];
+List<String> findResults = <String>[];              // display rows
+List<List<String>> findMeta = <List<String>>[];     // [className, isSt('1'/'0'), selector]
 void buildFind() {
   var W = paneW, H = paneH;
-  ui.label('fd_lbl', text: 'Find   -   substring over classes and members (from the VM class table)', frame: <int>[12, 36, W - 24, 18]); track('fd_lbl');
-  ui.field('fd_q', text: '', frame: <int>[12, 58, 300, 24], onEnter: doFind); track('fd_q');
-  ui.button('fd_go', title: 'Find', frame: <int>[320, 57, 80, 26], onClick: doFind); track('fd_go');
+  ui.label('fd_lbl', text: 'Find   -   classes + methods across the Dart VM AND the Smalltalk world.   Senders = classes whose source references the name.', frame: <int>[12, 36, W - 24, 18]); track('fd_lbl');
+  ui.field('fd_q', text: '', frame: <int>[12, 58, 300, 24], onEnter: () { doFind(); }); track('fd_q');
+  ui.button('fd_go', title: 'Find', frame: <int>[320, 57, 80, 26], onClick: () { doFind(); }); track('fd_go');
+  ui.button('fd_send', title: 'Senders', frame: <int>[408, 57, 96, 26], onClick: () { doSenders(); }); track('fd_send');
   ui.label('fd_rl', text: 'Matches (click a result to open it in the Browser)', frame: <int>[12, 92, W - 24, 18]); track('fd_rl');
   ui.list('fd_results', frame: <int>[12, 114, W - 24, H - 124],
-      rowCount: () => findResults.length, cellAt: (r) => findResults[r], onSelect: openFindResult); track('fd_results');
+      rowCount: () => findResults.length, cellAt: (r) => r < findResults.length ? findResults[r] : '', onSelect: openFindResult); track('fd_results');
 }
-void doFind() {
-  var q = ui.textOf('fd_q').toLowerCase().trim();
-  findResults = <String>[];
-  if (q.isNotEmpty) {
-    for (var c in classNames) { if (c.toLowerCase().contains(q)) findResults.add('class   ' + c); }
-    for (var c in classNames) {
-      var cm = classMirrors[c];
-      cm.declarations.forEach((sym, d) {
-        var nm = MirrorSystem.getName(sym);
-        if (nm.isNotEmpty && !nm.startsWith('_') && nm.toLowerCase().contains(q)) {
-          findResults.add(c + '.' + nm);
-        }
-      });
-      if (findResults.length > 500) break;
-    }
-  }
-  ui.set('fd_rl', {'text': 'Matches: ${findResults.length}  (click a result to open it in the Browser)'});
+
+void _paintFind(String q, String mode) {
+  ui.set('fd_rl', {'text': mode + ' "$q":  ${findResults.length} matches   (click a result to open it in the Browser)'});
   ui.set('fd_results', {'rows': findResults.length});
   ui.commit();
-  print('FIND: "$q" -> ${findResults.length} matches');
+  print('FIND($mode): "$q" -> ${findResults.length}');
 }
+
+// Bilingual find: Dart VM classes/members via mirrors (they carry no ST class),
+// PLUS the Smalltalk world via the server-side `find` verb (name + method sig).
+Future doFind() async {
+  var q = ui.textOf('fd_q').trim();
+  findResults = <String>[]; findMeta = <List<String>>[];
+  if (q.isEmpty) { _paintFind(q, 'Find'); return; }
+  var lq = q.toLowerCase();
+  for (var c in classNames) {
+    if (c.toLowerCase().contains(lq)) { findResults.add('Dart class    ' + c); findMeta.add(<String>[c, '0', '']); }
+  }
+  for (var c in classNames) {
+    var cm = classMirrors[c];
+    cm.declarations.forEach((sym, d) {
+      var nm = MirrorSystem.getName(sym);
+      if (nm.isNotEmpty && !nm.startsWith('_') && nm.toLowerCase().contains(lq)) {
+        findResults.add('Dart          ' + c + '.' + nm); findMeta.add(<String>[c, '0', nm]);
+      }
+    });
+    if (findResults.length > 400) break;
+  }
+  if (_lang != null) {
+    var st = await ask('find', q);
+    if (st is List) {
+      for (var e in st) {
+        if (e is! List || e.isEmpty) continue;
+        var cls = e[0].toString();
+        if (!_stClasses.contains(cls)) continue;      // Dart side already covered above
+        var sel = e.length > 1 ? e[1].toString() : '';
+        var side = e.length > 2 ? e[2].toString() : 'instance';
+        findResults.add('Smalltalk     ' + cls + (sel.isEmpty ? '' : (side == 'class' ? ' class>>' : ' >> ') + sel));
+        findMeta.add(<String>[cls, '1', sel]);
+      }
+    }
+  }
+  _paintFind(q, 'Find');
+}
+
+// Senders: every class whose SOURCE references the name (a selector or a class).
+Future doSenders() async {
+  var q = ui.textOf('fd_q').trim();
+  findResults = <String>[]; findMeta = <List<String>>[];
+  if (q.isEmpty || _lang == null) { _paintFind(q, 'Senders'); return; }
+  var s = await ask('senders', q);
+  if (s is List) {
+    for (var e in s) {
+      var cls = (e is List && e.isNotEmpty) ? e[0].toString() : e.toString();
+      var isSt = _stClasses.contains(cls) ? '1' : '0';
+      findResults.add((isSt == '1' ? 'Smalltalk     ' : 'Dart          ') + cls);
+      findMeta.add(<String>[cls, isSt, '']);
+    }
+  }
+  _paintFind(q, 'Senders');
+}
+
 void openFindResult(int r) {
-  if (r < 0 || r >= findResults.length) return;
-  var m = findResults[r];
-  var cls = m.startsWith('class   ') ? m.substring(8) : m.split('.')[0];
-  var idx = classNames.indexOf(cls);
-  if (idx < 0) return;
+  if (r < 0 || r >= findMeta.length) return;
+  var cls = findMeta[r][0];
+  var isSt = findMeta[r][1] == '1';
   switchTab(1);            // Browser
-  selectClass(idx);
-  print('FIND: open "$m" -> Browser class $cls');
+  if (isSt) {
+    _browseStClass(cls);
+  } else {
+    var idx = classNames.indexOf(cls);
+    if (idx >= 0) selectClass(idx);
+  }
+  print('FIND: open ' + (isSt ? 'ST ' : 'Dart ') + cls);
 }
 
 // ── App tab (T2): a user app (Calculator) materialized in the app pane ────────
