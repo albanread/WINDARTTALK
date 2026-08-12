@@ -33,7 +33,7 @@ puts "  browse Magnitude -> [ui browse Magnitude]"
 after 700
 puts "  selmeth between:and: -> [ui selmeth between:and:]"
 after 1000
-puts "  snap -> [ui snap e:/windart-talk/build/ui_method_body.png]"
+puts "  snap -> [ui snap [outpng ui_method_body]]"
 
 if {$fail} { puts "\nmethod body: FAILURES ABOVE"; exit 1 }
 puts "\nmethod body: OK — whole method bodies render on selection"

@@ -6,10 +6,11 @@
 import 'dart:win';
 import 'dart:io';
 import 'dart:async';
+import 'wsout.dart';
 
 main(List<String> args) {
   var mode = args.isNotEmpty ? args[0] : 'browse';
-  var png = args.length > 1 ? args[1] : 'e:/windart/build/workspace_userclass.png';
+  var png = args.length > 1 ? args[1] : outPng('workspace_userclass');
 
   var home = Platform.environment['USERPROFILE'];
   var dir = new Directory(home + '\\.windart');

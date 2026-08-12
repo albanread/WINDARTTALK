@@ -7,11 +7,11 @@ after 7000
 puts "== C6: bilingual Find + Senders =="
 puts "  ufind sqrt          -> [ui ufind sqrt]"
 after 400
-puts "  snap                -> [ui snap e:/windart-talk/build/ui_find.png]"
+puts "  snap                -> [ui snap [outpng ui_find]]"
 puts "  usenders Fraction   -> [ui usenders Fraction]"
 after 400
-puts "  snap                -> [ui snap e:/windart-talk/build/ui_senders.png]"
+puts "  snap                -> [ui snap [outpng ui_senders]]"
 puts "  ufindopen 0 (-> Browser) -> [ui ufindopen 0]"
 after 400
-puts "  snap                -> [ui snap e:/windart-talk/build/ui_find_opened.png]"
+puts "  snap                -> [ui snap [outpng ui_find_opened]]"
 exit 0

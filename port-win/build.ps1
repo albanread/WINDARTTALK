@@ -1,31 +1,56 @@
-# WINDART S1 build driver.
+# WINDART build driver (arch-parameterised — WINDARTARM AS1).
 #
-# Activates the MSVC 2026 x64 toolchain (vcvars64), configures the VM-core CMake
-# project with Ninja, and builds it — teeing all output to build\build.log.
+# Activates the matching MSVC toolchain (vcvars64 / vcvarsarm64), configures the
+# CMake project with Ninja, and builds it — teeing all output to the build dir's
+# build.log. Paths are repo-relative (no drive pins): with the repo cloned at
+# <workroot>\WINDARTTALK, the build lands in <workroot>\build-<arch> and the
+# extracted tree is expected at <workroot>\tree (see extract.py).
 #
 # Usage (from any normal PowerShell):
-#   powershell -ExecutionPolicy Bypass -File e:\windart\port-win\build.ps1
-#   ...\build.ps1 -Clean          # wipe the build dir first (fresh configure)
-#   ...\build.ps1 -Target dart_engine
+#   powershell -ExecutionPolicy Bypass -File ...\port-win\build.ps1                 # host arch
+#   ...\build.ps1 -Arch arm64 -Clean       # wipe the arch's build dir first
+#   ...\build.ps1 -Arch x64 -Target dart   # cross-arch dirs coexist side by side
 #
-# cl.exe is only on PATH after vcvars64, so we run cmake+ninja INSIDE the same
+# cl.exe is only on PATH after vcvars, so cmake+ninja run INSIDE the same
 # `cmd /c` that sources vcvars (the env does not survive back to PowerShell).
+# cmake/ninja themselves are addressed by FULL PATH (the VS-bundled copies), so
+# the build does not depend on what vcvars adds to PATH.
 [CmdletBinding()]
 param(
+  [ValidateSet('arm64', 'x64')]
+  [string]$Arch = $(if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }),
   [switch]$Clean,
   [string]$Target = "",
-  [string]$Config = "Debug"
+  [string]$Config = "Debug",
+  [string]$Tree = ""     # override -DWINDART_TREE (default: <workroot>\tree)
 )
 
 $ErrorActionPreference = "Stop"
 
-$VcVars = "C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars64.bat"
-$SrcDir = "e:\windart-talk\port-win"
-$BuildDir = "e:\windart-talk\build"
-$LogFile = Join-Path $BuildDir "build.log"
+$SrcDir   = $PSScriptRoot                          # ...\WINDARTTALK\port-win
+$RepoRoot = Split-Path -Parent $SrcDir             # ...\WINDARTTALK
+$WorkRoot = Split-Path -Parent $RepoRoot           # e.g. C:\projects\WINDARTARM
+$BuildDir = Join-Path $WorkRoot "build-$Arch"
+$LogFile  = Join-Path $BuildDir "build.log"
 
-if (-not (Test-Path $VcVars)) {
-  throw "vcvars64.bat not found at: $VcVars"
+$VsRoot = "C:\Program Files\Microsoft Visual Studio\18\Professional"
+# Pick the host_target vcvars. On an arm64 host, targeting x64 uses the NATIVE
+# arm64 cross tools (vcvarsarm64_amd64) rather than running the x64 toolchain
+# under emulation — same output, far faster. The resulting x64 binaries then run
+# under WoA's x64 emulation, which is exactly what makes the x64 build usable
+# here as a CONTROL for arm64-specific behaviour.
+$HostIsArm = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64')
+$VcVars = switch ("$Arch/$HostIsArm") {
+  'arm64/True'  { "$VsRoot\VC\Auxiliary\Build\vcvarsarm64.bat" }
+  'arm64/False' { "$VsRoot\VC\Auxiliary\Build\vcvarsamd64_arm64.bat" }
+  'x64/True'    { "$VsRoot\VC\Auxiliary\Build\vcvarsarm64_amd64.bat" }
+  default       { "$VsRoot\VC\Auxiliary\Build\vcvars64.bat" }
+}
+$CMakeExe = "$VsRoot\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+$NinjaExe = "$VsRoot\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+
+foreach ($p in @($VcVars, $CMakeExe, $NinjaExe)) {
+  if (-not (Test-Path $p)) { throw "not found: $p" }
 }
 
 if ($Clean -and (Test-Path $BuildDir)) {
@@ -38,27 +63,28 @@ New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 $NinjaTarget = ""
 if ($Target -ne "") { $NinjaTarget = " $Target" }
 
-# One cmd invocation: vcvars -> cmake configure -> ninja build, chained with
-# `&&` so a failed step aborts the rest. MUST be a SINGLE-LINE command string:
-# PowerShell does not pass a multi-line here-string (with `^` continuations)
-# through to `cmd /c` correctly — cmd misparses it and runs nothing. `-k 0`
-# keeps ninja going after an error so a failing build yields a full burn-down.
-$Inner = "call `"$VcVars`" && " +
-         "cmake -G Ninja -S `"$SrcDir`" -B `"$BuildDir`" -DCMAKE_BUILD_TYPE=$Config && " +
-         "ninja -C `"$BuildDir`" -k 0$NinjaTarget"
+$TreeArg = ""
+if ($Tree -ne "") { $TreeArg = " -DWINDART_TREE=`"$Tree`"" }
 
-# Redirect the WHOLE chain to the log INSIDE cmd (parenthesized group), for two
-# reasons: (1) cmd's `>` writes ANSI, so build.log stays grep-able — PowerShell's
-# own `>` would write UTF-16; (2) all native output (incl. vcvars64's benign
-# `vswhere.exe` stderr line) goes to the file, so PowerShell never promotes it to
-# a terminating NativeCommandError. $LASTEXITCODE is then ninja's real exit code.
+# One cmd invocation: vcvars -> cmake configure -> ninja build, chained with
+# `&&` so a failed step aborts the rest. MUST be a SINGLE-LINE command string
+# (cmd misparses PS-mangled multi-line strings). `-k 0` keeps ninja going after
+# an error so a failing build yields a full burn-down list.
+$Inner = "call `"$VcVars`" && " +
+         "`"$CMakeExe`" -G Ninja -S `"$SrcDir`" -B `"$BuildDir`" " +
+         "-DCMAKE_BUILD_TYPE=$Config -DCMAKE_MAKE_PROGRAM=`"$NinjaExe`" " +
+         "-DWINDART_ARCH=$Arch$TreeArg && " +
+         "`"$NinjaExe`" -C `"$BuildDir`" -k 0$NinjaTarget"
+
+# Redirect the WHOLE chain to the log INSIDE cmd (parenthesized group): cmd's
+# `>` writes ANSI (grep-able), and all native stderr stays out of PowerShell's
+# NativeCommandError promotion. $LASTEXITCODE is then ninja's real exit code.
 $Full = "( $Inner ) > `"$LogFile`" 2>&1"
 
-Write-Host "build.ps1: configuring + building ($Config) -> $LogFile"
+Write-Host "build.ps1: [$Arch/$Config] configuring + building -> $LogFile"
 $ErrorActionPreference = "Continue"
 & cmd /c $Full
 $rc = $LASTEXITCODE
-# Echo the tail so the console still shows the result.
 if (Test-Path $LogFile) { Get-Content -Path $LogFile -Tail 30 }
 
 Write-Host "build.ps1: exit code $rc (full log: $LogFile)"

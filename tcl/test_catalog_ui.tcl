@@ -8,14 +8,14 @@ puts "== C6: rolling catalog =="
 
 puts "  ucatalog             -> [ui ucatalog]"
 after 500
-puts "  snap                 -> [ui snap e:/windart-talk/build/ui_catalog.png]"
+puts "  snap                 -> [ui snap [outpng ui_catalog]]"
 
 set mst [file normalize [file join [file dirname [info script]] rolling_hello.mst]]
 puts "  ucatload rolling_hello.mst -> [ui ucatload $mst]"
 after 800
-puts "  snap                 -> [ui snap e:/windart-talk/build/ui_catalog_rolled.png]"
+puts "  snap                 -> [ui snap [outpng ui_catalog_rolled]]"
 
 puts "  ucatapp RollingHello -> [ui ucatapp RollingHello]"
 after 900
-puts "  snap                 -> [ui snap e:/windart-talk/build/ui_catalog_app.png]"
+puts "  snap                 -> [ui snap [outpng ui_catalog_app]]"
 exit 0

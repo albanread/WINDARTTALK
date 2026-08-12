@@ -14,7 +14,7 @@ puts "== C3 UI: Smalltalk editor (real source + live Accept) =="
 
 puts "  edclass OrderedCollection -> [ui edclass OrderedCollection]"
 after 1000
-puts "  snap -> [ui snap e:/windart-talk/build/ui_c3_editor.png]"
+puts "  snap -> [ui snap [outpng ui_c3_editor]]"
 
 ui edclass Widget9
 ui edset {Object subclass: Widget9 [ area [ ^10 ] ]}

@@ -23,12 +23,17 @@ import shutil
 import subprocess
 import sys
 
-# --- Fixed locations (this is a Windows-only, path-pinned port) --------------
-HERE = os.path.dirname(os.path.abspath(__file__))          # e:\windart\port-win
-SRC = r"e:\dart_origins\sdk-1.24.3"                        # reference quarry (RO)
-DEST = r"e:\windart-talk\tree"                              # owned Windows tree (bilingual ST fork)
+# --- Locations (WINDARTARM: de-pinned; repo-relative defaults, env overrides) -
+# Layout: <workroot>\WINDARTTALK\port-win\extract.py (this file),
+#         <workroot>\sdk-1.24.3 (quarry), <workroot>\tree (DEST, generated).
+HERE = os.path.dirname(os.path.abspath(__file__))          # ...\WINDARTTALK\port-win
+_WORKROOT = os.path.normpath(os.path.join(HERE, os.pardir, os.pardir))
+SRC = os.environ.get("WINDART_SDK_SRC") or os.path.join(_WORKROOT, "sdk-1.24.3")
+DEST = os.environ.get("WINDART_TREE") or os.path.join(_WORKROOT, "tree")
 PATCH = os.path.join(HERE, "windart-port.patch")           # optional (see below)
 ST_PATCH = os.path.join(HERE, "st-tree.patch")             # WINDART-TALK: ST front-end tree hunks
+ARM64_PATCH = os.path.normpath(os.path.join(                # WINDARTARM: windows-arm64 arch seam
+    HERE, os.pardir, "port-arm64", "windart-arm64.patch"))  # (7 files; see the arm64 plan §2)
 
 # Test/junk excludes applied to every runtime subtree copy (fnmatch on basename).
 COMMON_EXCLUDES = ("*_test.cc", "*_test.h", "*_test_*.cc", ".git")
@@ -126,6 +131,20 @@ def apply_windart_patch() -> None:
         with open(ST_PATCH, 'rb') as fh:
             subprocess.run([patch_exe, '-p1', '-d', DEST], stdin=fh, check=True)
         log('applied st-tree.patch (12 files: dart:cocoa embedder + ST hooks + NSM)')
+    # WINDARTARM: the windows-arm64 arch seam, LAST (its shared-file hunks are
+    # net-zero-line and above/away from the port patch's, so order is safe either
+    # way — verified). All hunks are #if-guarded on _M_ARM64/HOST_ARCH_ARM64/
+    # TARGET_ARCH_ARM64, so the SAME tree still builds x64 byte-identically.
+    # Dry-run first: GNU patch applies file-by-file, and a mid-stream reject
+    # would leave a half-patched tree (recoverable by re-running extract, but
+    # fail loudly and early instead).
+    if os.path.isfile(ARM64_PATCH):
+        with open(ARM64_PATCH, 'rb') as fh:
+            subprocess.run([patch_exe, '-p1', '--dry-run', '-d', DEST],
+                           stdin=fh, check=True)
+        with open(ARM64_PATCH, 'rb') as fh:
+            subprocess.run([patch_exe, '-p1', '-d', DEST], stdin=fh, check=True)
+        log('applied windart-arm64.patch (8 files: the windows-arm64 arch seam)')
 
 
 def count_ext(root_rel: str, ext: str) -> int:

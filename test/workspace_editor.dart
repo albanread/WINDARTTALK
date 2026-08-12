@@ -4,9 +4,10 @@
 //
 // Two headless proofs: (a) a syntax-coloured snippet in the editor (PNG), and
 // (b) captured Do-It results to stdout (expressions evaluated against the VM).
-//   dartui.exe workspace_editor.dart e:/windart/build/workspace_editor.png
+//   dartui.exe workspace_editor.dart [out.png]   (default: <workRoot>/shots/workspace_editor.png)
 import 'dart:win';
 import 'dart:async';
+import 'wsout.dart';
 
 // ── lexDart — ported VERBATIM from workspace.dart:1024-1102 (platform-neutral).
 // Produces flat [start, len, kind, ...] runs: 1 keyword, 2 string, 3 comment,
@@ -90,7 +91,7 @@ List<int> lexDart(String s) {
 }
 
 main(List<String> args) {
-  var out = args.isNotEmpty ? args[0] : 'e:/windart/build/workspace_editor.png';
+  var out = args.isNotEmpty ? args[0] : outPng('workspace_editor');
 
   var ui = new Ui.pane(1084, 740);
   ui.title('WINDART Workspace  -  editor + live Do It');

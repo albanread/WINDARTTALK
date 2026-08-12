@@ -3,14 +3,16 @@
 // Renders to the S5 Direct2D canvas; self-drives headlessly (injects a serve,
 // then plays with no keys); snapshots to PNG.
 //
-//   dartui.exe game_runner.dart 11_pong e:/windart/build/game_pong.png 60
+//   dartui.exe game_runner.dart 11_pong shots/game_pong.png 60
+// With no <outPng> the capture lands in the shared output dir (see wsout.dart).
 import 'dart:win';
 import 'dart:isolate';
 import 'dart:async';
+import 'wsout.dart';
 
 main(List<String> args) {
   var game = args.length > 0 ? args[0] : '11_pong';
-  var outPng = args.length > 1 ? args[1] : 'e:/windart/build/game_$game.png';
+  var out = args.length > 1 ? args[1] : outPng('game_$game');
   var target = args.length > 2 ? int.parse(args[2]) : 60;
   const int W = 480, H = 360;
 
@@ -44,8 +46,8 @@ main(List<String> args) {
       frames++;
       if (frames >= target) {
         done = true;
-        var e = ui.snapshot(outPng);   // unified Win_surfaceSnapshot (S6 §4)
-        print('GAME: SNAP $game frames=$frames -> $outPng '
+        var e = ui.snapshot(out);      // unified Win_surfaceSnapshot (S6 §4)
+        print('GAME: SNAP $game frames=$frames -> $out '
             '${e.isEmpty ? "OK" : "ERR:$e"}');
         rp.close();
         hostQuit();
@@ -57,7 +59,7 @@ main(List<String> args) {
   });
 
   Isolate
-      .spawnUri(Uri.parse('demos/$game.dart'), <String>['$W', '$H'], rp.sendPort)
+      .spawnUri(sibling('demos/$game.dart'), <String>['$W', '$H'], rp.sendPort)
       .catchError((e) {
         print('GAME: spawn error: $e');
         hostQuit();

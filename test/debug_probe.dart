@@ -8,6 +8,7 @@
 import 'dart:win';
 import 'dart:isolate';
 import 'dart:async';
+import 'wsout.dart';   // sibling(): spawn relative to THIS script, not the CWD
 
 main(List<String> args) {
   uiReady();
@@ -24,7 +25,7 @@ main(List<String> args) {
   });
 
   Isolate
-      .spawnUri(Uri.parse('debug_target.dart'), <String>[], rp.sendPort)
+      .spawnUri(sibling('debug_target.dart'), <String>[], rp.sendPort)
       .catchError((e) { print('PROBE: spawn error: $e'); hostQuit(); });
 
   var ticks = 0;

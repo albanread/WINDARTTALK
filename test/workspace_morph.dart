@@ -7,6 +7,7 @@ import 'dart:win';
 import 'dart:io';
 import 'dart:async';
 import 'counter_scratch.dart';
+import 'wsout.dart';
 
 dynamic gc;   // a top-level: survives the reload, holding the live instance
 
@@ -19,7 +20,8 @@ main(List<String> args) {
   print('MORPH: v1  gc.n = ${gc.n}   (expect 3)');
 
   // ── Accept: edit the class (add `int step`) by rewriting the scratch source ──
-  var scratch = new File('e:/windart/test/counter_scratch.dart');
+  // The scratch source is the one this script imports — it sits beside the script.
+  var scratch = new File('$scriptDir/counter_scratch.dart');
   scratch.writeAsStringSync(
       'class Counter {\n'
       '  int n = 0;\n'

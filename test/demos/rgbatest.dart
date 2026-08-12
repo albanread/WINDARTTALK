@@ -4,7 +4,7 @@
 // (the bars show through, tinted), an OPAQUE smooth gradient (proves >palette
 // colour count), two translucent bars, and a soft edge vignette (per-pixel
 // alpha). Built pixel-exact in Dart and blitted once; both layers retain.
-//   dartui.exe gp_runner.dart rgbatest e:/windart/build/rgba_test.png 4
+//   dartui.exe gp_runner.dart rgbatest shots/rgba_test.png 4
 library rgbatest;
 
 import 'dart:isolate';

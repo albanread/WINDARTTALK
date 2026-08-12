@@ -234,8 +234,17 @@ static void UploadDynamic(ID3D11DeviceContext* ctx, ID3D11Buffer* b,
   }
 }
 
-// R8_UINT texture. initData != NULL -> IMMUTABLE (sprite frame); NULL ->
-// DEFAULT (index slot, later UpdateSubresource'd).
+// R8_UINT texture. initData != NULL -> IMMUTABLE (sprite frame, written once);
+// NULL -> DYNAMIC (index slot, re-uploaded every dirty frame via Map).
+//
+// WINDARTARM: the index slots were DEFAULT + UpdateSubresource. On this SoC the
+// GPU shares physical DRAM with the CPU (Adreno reports UMA: YES, 16 GB
+// shared), so UpdateSubresource's driver-side staging copy is pure waste —
+// measured at ~8x the cost of DYNAMIC + Map(WRITE_DISCARD) at the pane's real
+// sizes, and ~18x once the plotting also lands straight in mapped memory.
+// See port-arm64/GPU_UMA_DESIGN.md §2. Sprite frames stay IMMUTABLE: they are
+// uploaded once at definition time, so there is nothing to win and IMMUTABLE
+// lets the driver place them optimally.
 static bool MakeIndexTex(ID3D11Device* dev, int w, int h, const uint8_t* initData,
                          ComPtr<ID3D11Texture2D>& tex,
                          ComPtr<ID3D11ShaderResourceView>& srv) {
@@ -243,8 +252,9 @@ static bool MakeIndexTex(ID3D11Device* dev, int w, int h, const uint8_t* initDat
   td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
   td.Format = DXGI_FORMAT_R8_UINT;
   td.SampleDesc.Count = 1;
-  td.Usage = initData ? D3D11_USAGE_IMMUTABLE : D3D11_USAGE_DEFAULT;
+  td.Usage = initData ? D3D11_USAGE_IMMUTABLE : D3D11_USAGE_DYNAMIC;
   td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  if (initData == NULL) td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
   D3D11_SUBRESOURCE_DATA srd = {};
   srd.pSysMem = initData;
   srd.SysMemPitch = (UINT)w;
@@ -443,13 +453,69 @@ void GpIndexedPane::upload() {
   }
   for (int i = 0; i < kNumBuffers; i++) {
     if (!dirty_[i]) continue;
-    gfx_->ctx->UpdateSubresource(tex_[i].Get(), 0, nullptr, buffers_[i].data(),
-                                 (UINT)world_w_, 0);
-    dirty_[i] = false;
+    // WINDARTARM: DYNAMIC + WRITE_DISCARD instead of UpdateSubresource — on a
+    // unified-memory GPU the driver's staging copy is dead weight (see
+    // MakeIndexTex). WRITE_DISCARD is correct here because the whole slot is
+    // rewritten from buffers_[i], which is the CPU-side source of truth: the
+    // discarded contents are never read back.
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(gfx_->ctx->Map(tex_[i].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                 &m))) {
+      const uint8_t* src = buffers_[i].data();
+      uint8_t* dst = static_cast<uint8_t*>(m.pData);
+      if (m.RowPitch == (UINT)world_w_) {
+        memcpy(dst, src, (size_t)world_w_ * (size_t)world_h_);   // tight
+      } else {
+        for (int y = 0; y < world_h_; y++) {                     // padded rows
+          memcpy(dst + (size_t)y * m.RowPitch,
+                 src + (size_t)y * (size_t)world_w_, (size_t)world_w_);
+        }
+      }
+      gfx_->ctx->Unmap(tex_[i].Get(), 0);
+      dirty_[i] = false;
+    }
+    // A failed Map leaves dirty_ set, so the slot retries next frame rather
+    // than silently showing a stale image.
   }
 }
 
+// ── WINDARTARM: direct-framebuffer mode (§6b) ──────────────────────────────
+// Map the ACTIVE slot and hand its GPU memory out. WRITE_DISCARD is right here
+// for the same reason as upload(): a direct renderer writes every pixel of the
+// frame, so the discarded contents are never read. The caller gets `pitch`
+// because D3D may pad rows — it is NOT safe to assume pitch == world_w().
+uint8_t* GpIndexedPane::MapDirect(UINT* pitch) {
+  if (direct_mapped_) {                 // already mapped this frame — reuse
+    if (pitch != NULL) *pitch = direct_pitch_;
+    return direct_ptr_;
+  }
+  D3D11_MAPPED_SUBRESOURCE m;
+  if (FAILED(gfx_->ctx->Map(tex_[active_].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                            &m))) {
+    return NULL;
+  }
+  direct_mapped_ = true;
+  direct_slot_ = active_;               // unmap the SAME slot even if active_ moves
+  direct_pitch_ = m.RowPitch;
+  direct_ptr_ = static_cast<uint8_t*>(m.pData);
+  if (pitch != NULL) *pitch = direct_pitch_;
+  return direct_ptr_;
+}
+
+// Release the mapping so the GPU may read the texture. Called at the frame
+// boundary (GpEngine::begin_frame) and before any readback; idempotent.
+void GpIndexedPane::UnmapDirect() {
+  if (!direct_mapped_) return;
+  gfx_->ctx->Unmap(tex_[direct_slot_].Get(), 0);
+  direct_mapped_ = false;
+  direct_ptr_ = NULL;
+  // The slot now holds what Dart wrote, so it must NOT be re-uploaded from
+  // buffers_[] — that would overwrite the frame with stale CPU-side content.
+  dirty_[direct_slot_] = false;
+}
+
 void GpIndexedPane::render(ID3D11RenderTargetView* rtv, bool clear) {
+  UnmapDirect();   // never draw from a mapped resource
   if (!ps_) return;
   ID3D11DeviceContext* ctx = gfx_->ctx;
   ctx->OMSetBlendState(nullptr, nullptr, 0xffffffff);
@@ -1009,8 +1075,203 @@ GpShaderPane::GpShaderPane(GpGfx* gfx)
   MakeVS(gfx_->dev, kShaderHeaderHlsl, "vs_shader", vs_, nullptr, &err);
 }
 
+// ── WINDARTARM: MSL/GLSL -> HLSL dialect shim ──────────────────────────────
+// The Smalltalk world was written against Metal — world/43's GamePane declares
+// `shader: mslSource`, and demos/galaxigans.mst's cosmosShader opens with
+// `fract(sin(dot(...)))`. D3DCompile rejects that outright:
+//     error X3004: undeclared identifier 'fract'
+// so layer 0 (the cosmos/starfield background) never compiled and every such
+// game rendered on a black field. Rather than port each game's shader by hand,
+// translate the handful of names that actually differ. Vector types (float2/3/4,
+// float2x2) and the bulk of the library (sin/cos/floor/dot/length/normalize/
+// clamp/step/smoothstep/pow/exp/abs/min/max) are spelled identically in both,
+// so the delta is small.
+//
+// Two deliberate constraints:
+//  * Only an identifier immediately followed by `(` is rewritten — a *call*.
+//    A variable innocently named `mix` is left alone; renaming it to `lerp`
+//    would shadow the intrinsic and break an otherwise valid shader.
+//  * `mod` is NOT mapped to `fmod`. GLSL/MSL `mod(x,y) = x - y*floor(x/y)`
+//    but HLSL `fmod` truncates, so they DISAGREE for negative operands — a
+//    silent wrong-pixel bug, exactly the kind that is miserable to find later.
+//    It maps to a helper below with the GLSL definition.
+//  * The mapping is identity-safe for input that is ALREADY HLSL: none of
+//    `frac`/`lerp`/`rsqrt`/`ddx`/`ddy`/`atan2` appear as source tokens here.
+static bool GpIsIdentChar(char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') || c == '_';
+}
+
+// Number of top-level (depth-1) comma-separated arguments of the call whose
+// '(' sits at open. Used to tell MSL's 2-arg atan from HLSL's 1-arg atan.
+static int GpCallArgCount(const std::string& s, size_t open) {
+  int depth = 0, args = 1;
+  for (size_t i = open; i < s.size(); i++) {
+    char c = s[i];
+    if (c == '(') { depth++; }
+    else if (c == ')') { depth--; if (depth == 0) return args; }
+    else if (c == ',' && depth == 1) { args++; }
+  }
+  return 0;   // unbalanced — leave the call alone
+}
+
+// Rewrite an MSL *fragment entry point* into the HLSL one this engine expects.
+// MACDART's world games are written as whole Metal fragment shaders:
+//
+//   fragment float4 fmain(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
+//       float t = u.time;  float2 uv = in.uv;  float a = u.aspect;  ... u.p[0] ...
+//
+// while kShaderHeaderHlsl supplies `GVOut` (with .uv) and the uniforms as
+// GLOBALS (time, aspect, p[8]). So three things change: the `fragment`
+// qualifier and MSL `[[attributes]]` go, the parameter list collapses to
+// `(GVOut gpIn) : SV_Target`, and the uniform-struct prefix is dropped so
+// `u.time` becomes `time`. The stage_in parameter is renamed because MSL bodies
+// conventionally call it `in`, which is a parameter-modifier keyword in HLSL.
+//
+// Leaves a body that is already HLSL completely alone: no `fragment` token, no
+// rewrite.
+static void GpTranslateMslEntry(std::string& s) {
+  // 1. Drop MSL attribute clauses [[...]] wherever they appear.
+  for (size_t a = s.find("[["); a != std::string::npos; a = s.find("[[")) {
+    size_t b = s.find("]]", a);
+    if (b == std::string::npos) break;
+    s.erase(a, b + 2 - a);
+  }
+  // 2. Find the `fragment` qualifier as a whole token.
+  size_t f = std::string::npos;
+  for (size_t i = 0; i + 8 <= s.size(); i++) {
+    if (s.compare(i, 8, "fragment") != 0) continue;
+    if (i > 0 && GpIsIdentChar(s[i - 1])) continue;
+    if (i + 8 < s.size() && GpIsIdentChar(s[i + 8])) continue;
+    f = i; break;
+  }
+  if (f == std::string::npos) return;             // already HLSL — nothing to do
+  size_t open = s.find('(', f);
+  if (open == std::string::npos) return;
+  int depth = 0; size_t close = std::string::npos;
+  for (size_t i = open; i < s.size(); i++) {
+    if (s[i] == '(') depth++;
+    else if (s[i] == ')') { depth--; if (depth == 0) { close = i; break; } }
+  }
+  if (close == std::string::npos) return;
+
+  // 3. The entry name is the identifier just before '('.
+  size_t ne = open; while (ne > f && isspace((unsigned char)s[ne - 1])) ne--;
+  size_t nb = ne; while (nb > f && GpIsIdentChar(s[nb - 1])) nb--;
+  const std::string fname = s.substr(nb, ne - nb);
+  if (fname.empty()) return;
+
+  // 4. Parameter names: the uniform one is the parameter declared `constant`
+  //    or by reference; the other is stage_in.
+  std::string stage_in, uniform;
+  const std::string params = s.substr(open + 1, close - open - 1);
+  size_t p = 0;
+  while (p <= params.size()) {
+    size_t comma = params.find(',', p);
+    std::string one = params.substr(p, (comma == std::string::npos)
+                                           ? std::string::npos : comma - p);
+    size_t e = one.find_last_not_of(" \t\r\n");
+    if (e != std::string::npos) {
+      size_t b2 = e; while (b2 > 0 && GpIsIdentChar(one[b2 - 1])) b2--;
+      const std::string nm = one.substr(b2, e - b2 + 1);
+      const bool is_uniform = one.find("constant") != std::string::npos ||
+                              one.find('&') != std::string::npos;
+      if (is_uniform) uniform = nm; else if (stage_in.empty()) stage_in = nm;
+    }
+    if (comma == std::string::npos) break;
+    p = comma + 1;
+  }
+
+  // 5. Swap the signature for the HLSL one.
+  s.replace(f, close + 1 - f, "float4 " + fname + "(GVOut gpIn) : SV_Target");
+
+  // 6. `in.uv` -> `gpIn.uv`, and `u.time` -> `time` (the uniforms are globals).
+  struct Fix { std::string from, to; };
+  std::vector<Fix> fixes;
+  if (!stage_in.empty()) fixes.push_back({ stage_in + ".", "gpIn." });
+  if (!uniform.empty())  fixes.push_back({ uniform + ".",  ""      });
+  if (fixes.empty()) return;
+  std::string out; out.reserve(s.size());
+  for (size_t i = 0; i < s.size();) {
+    bool hit = false;
+    if (i == 0 || !GpIsIdentChar(s[i - 1])) {
+      for (size_t k = 0; k < fixes.size(); k++) {
+        const std::string& from = fixes[k].from;
+        if (s.compare(i, from.size(), from) == 0) {
+          out += fixes[k].to; i += from.size(); hit = true; break;
+        }
+      }
+    }
+    if (!hit) out.push_back(s[i++]);
+  }
+  s.swap(out);
+}
+
+static std::string GpTranslateShaderDialect(const std::string& src) {
+  struct Map { const char* from; const char* to; };
+  static const Map kMap[] = {
+    { "fract",        "frac"    },
+    { "mix",          "lerp"    },
+    { "inversesqrt",  "rsqrt"   },
+    { "dfdx",         "ddx"     },
+    { "dfdy",         "ddy"     },
+    { "mod",          "gpModGl" },   // GLSL semantics, see the helper prelude
+  };
+  std::string out;
+  out.reserve(src.size() + 64);
+  size_t i = 0;
+  while (i < src.size()) {
+    if (!GpIsIdentChar(src[i]) || (i > 0 && GpIsIdentChar(src[i - 1]))) {
+      out.push_back(src[i++]);
+      continue;
+    }
+    size_t j = i;
+    while (j < src.size() && GpIsIdentChar(src[j])) j++;
+    std::string tok = src.substr(i, j - i);
+    // Is this a call? (identifier, optional spaces, '(')
+    size_t k = j;
+    while (k < src.size() && (src[k] == ' ' || src[k] == '\t')) k++;
+    const bool is_call = (k < src.size() && src[k] == '(');
+
+    std::string rep = tok;
+    if (is_call) {
+      for (size_t m = 0; m < sizeof(kMap) / sizeof(kMap[0]); m++) {
+        if (tok == kMap[m].from) { rep = kMap[m].to; break; }
+      }
+      // MSL/GLSL atan(y, x) is HLSL atan2(y, x); atan(x) is atan() in both.
+      if (tok == "atan" && GpCallArgCount(src, k) == 2) rep = "atan2";
+      // MSL `discard_fragment();` -> HLSL `discard;` — the token map alone
+      // would leave the call parens behind as `discard()`, which HLSL rejects,
+      // so swallow the empty argument list too.
+      if (tok == "discard_fragment") {
+        rep = "discard";
+        size_t q = k + 1;                                   // just past '('
+        while (q < src.size() && isspace((unsigned char)src[q])) q++;
+        if (q < src.size() && src[q] == ')') { out += rep; i = q + 1; continue; }
+      }
+    }
+    out += rep;
+    i = j;
+  }
+  return out;
+}
+
+// GLSL/MSL `mod` — floor-based, so the sign follows the DIVISOR (unlike HLSL's
+// truncating fmod). Overloaded for the vector widths a shader body may use.
+static const char* kGpDialectPrelude =
+    "float  gpModGl(float  x, float  y) { return x - y * floor(x / y); }\n"
+    "float2 gpModGl(float2 x, float2 y) { return x - y * floor(x / y); }\n"
+    "float3 gpModGl(float3 x, float3 y) { return x - y * floor(x / y); }\n"
+    "float4 gpModGl(float4 x, float4 y) { return x - y * floor(x / y); }\n"
+    "float2 gpModGl(float2 x, float  y) { return x - y * floor(x / y); }\n"
+    "float3 gpModGl(float3 x, float  y) { return x - y * floor(x / y); }\n"
+    "float4 gpModGl(float4 x, float  y) { return x - y * floor(x / y); }\n";
+
 std::string GpShaderPane::compile(const char* frag_hlsl) {
-  std::string src = std::string(kShaderHeaderHlsl) + "\n" + frag_hlsl;
+  std::string body = GpTranslateShaderDialect(frag_hlsl);
+  GpTranslateMslEntry(body);          // MSL entry point -> HLSL, if present
+  std::string src = std::string(kShaderHeaderHlsl) + "\n" + kGpDialectPrelude +
+                    "\n" + body;
   std::string err;
   ComPtr<ID3D11PixelShader> ps;
   if (!MakePS(gfx_->dev, src.c_str(), "fmain", ps, &err)) {
@@ -1123,13 +1384,16 @@ int64_t GpEngine::open(int w, int h, int world_w, int world_h, bool direct,
                        std::string* err) {
   if (!ensure_device(err)) return 0;
   close();
-  if (direct) {
-    if (err) *err = "gamepane: direct framebuffer mode deferred (S6b)";
-    return 0;
-  }
   if (world_w < w) world_w = w;
   if (world_h < h) world_h = h;
-  direct_ = false;
+  // WINDARTARM: §6b direct-framebuffer mode is no longer deferred — this used
+  // to reject `direct` outright. A direct game now shares the indexed pane's
+  // texture and palette and writes through Win_gpBackbuffer's mapped pointer
+  // (GpIndexedPane::MapDirect), so the only thing the flag still selects is
+  // what is_direct()/gpStat()[5] report. Recording it truthfully matters:
+  // leaving the rejection in place while workspace.dart forwards gpopen's mode
+  // argument made every 'direct': true game throw at open instead of rendering.
+  direct_ = direct;
   logical_w_ = w; logical_h_ = h;
 
   D3D11_TEXTURE2D_DESC td = {};

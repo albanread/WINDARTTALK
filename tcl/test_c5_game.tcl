@@ -15,6 +15,6 @@ puts "  game: '$first'  (pure-compute fractal; sound games need the deferred FFI
 set r [ui stgame $first]
 puts "  stgame $first -> $r"
 after 3000
-set gs [ui gpsnap e:/windart-talk/build/ui_c5_game.png]
+set gs [ui gpsnap [outpng ui_c5_game]]
 puts "  gpsnap result: $gs"
 exit 0

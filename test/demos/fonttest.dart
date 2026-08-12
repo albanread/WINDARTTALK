@@ -1,7 +1,7 @@
 // WINDART font test — draws the full printable ASCII set and sample HUD strings
 // in several colours, proving the font-atlas text layer renders real glyphs.
 // (Letters used to draw as hollow boxes; digits as 7-segment.) Headless:
-//   dartui.exe gp_runner.dart fonttest e:/windart/build/font_test.png 6
+//   dartui.exe gp_runner.dart fonttest shots/font_test.png 6
 library fonttest;
 
 import 'dart:isolate';

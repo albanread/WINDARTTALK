@@ -13,16 +13,16 @@
 //   * the on-screen swapchain backbuffer PNG (gpSnapPresent -> what the window shows),
 // then quits. Without `selftest` it stays open and interactive.
 //
-//   dartui.exe game_live.dart 13_invaders e:/windart/build/game_invaders_live.png selftest
+//   dartui.exe game_live.dart 13_invaders shots/game_invaders_live.png selftest
 import 'dart:win';
 import 'dart:isolate';
 import 'dart:async';
+import 'wsout.dart';
 
 main(List<String> args) {
   var game = args.length > 0 ? args[0] : '13_invaders';
-  var outPng = args.length > 1
-      ? args[1]
-      : 'e:/windart/build/game_${game}_live.png';
+  // Local renamed from `outPng` so it does not shadow the imported outPng().
+  var out = args.length > 1 ? args[1] : outPng('game_${game}_live');
   var selftest = args.contains('selftest');
   const int W = 424, H = 240;                 // logical game size
   const int SCALE = 2;                        // on-screen scale (aspect preserved)
@@ -76,7 +76,7 @@ main(List<String> args) {
     frames++;
 
     if (selftest && frames == 1) {
-      var e = gpSnap('e:/windart/build/${game}_frame1.png');
+      var e = gpSnap(outPng('${game}_frame1'));
       print('GAME: baseline frame 1 ${e.isEmpty ? "OK" : "ERR:$e"}');
     }
     if (selftest && frames == 3) {
@@ -88,11 +88,11 @@ main(List<String> args) {
     }
     if (selftest && !snapped && frames >= 48) {
       snapped = true;
-      var e1 = gpSnap(outPng);                                        // offscreen (moved)
-      var e2 = gpSnapPresent('e:/windart/build/${game}_present.png'); // on-screen letterbox
-      print('GAME: LIVE snap $game frames=$frames -> $outPng '
+      var e1 = gpSnap(out);                                   // offscreen (moved)
+      var e2 = gpSnapPresent(outPng('${game}_present'));      // on-screen letterbox
+      print('GAME: LIVE snap $game frames=$frames -> $out '
           '${e1.isEmpty ? "OK" : "ERR:$e1"}');
-      print('GAME: PRESENT snap -> ${game}_present.png '
+      print('GAME: PRESENT snap -> ${outPng('${game}_present')} '
           '${e2.isEmpty ? "OK" : "ERR:$e2"}');
       var st = gpStat();
       print('GAME: stat open=${st[0]} framesPresented=${st[1]} '
@@ -107,7 +107,7 @@ main(List<String> args) {
   });
 
   Isolate
-      .spawnUri(Uri.parse('demos/$game.dart'), <String>['$W', '$H'], rp.sendPort)
+      .spawnUri(sibling('demos/$game.dart'), <String>['$W', '$H'], rp.sendPort)
       .catchError((e) {
         print('GAME: spawn error: $e');
         hostQuit();

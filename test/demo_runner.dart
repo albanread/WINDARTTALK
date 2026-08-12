@@ -4,14 +4,16 @@
 // -> UI isolate -> Win_canvasDraw (Direct2D) -> WIC PNG readback.
 //
 //   dartui.exe demo_runner.dart <demoBaseName> <outPng> <frames>
-// e.g. dartui.exe demo_runner.dart 03_lissajous e:/windart/build/lissajous.png 40
+// e.g. dartui.exe demo_runner.dart 03_lissajous shots/lissajous.png 40
+// With no <outPng> the capture lands in the shared output dir (see wsout.dart).
 import 'dart:win';
 import 'dart:isolate';
 import 'dart:async';
+import 'wsout.dart';
 
 main(List<String> args) {
   var demo = args.length > 0 ? args[0] : '03_lissajous';
-  var outPng = args.length > 1 ? args[1] : 'e:/windart/build/demo_$demo.png';
+  var out = args.length > 1 ? args[1] : outPng('demo_$demo');
   var target = args.length > 2 ? int.parse(args[2]) : 40;
   const int W = 480, H = 360;
 
@@ -35,8 +37,8 @@ main(List<String> args) {
       frames++;
       if (frames >= target) {
         done = true;
-        var e = ui.canvasSnap('cv', outPng);
-        print('RUNNER: SNAP demo=$demo frames=$frames -> $outPng '
+        var e = ui.canvasSnap('cv', out);
+        print('RUNNER: SNAP demo=$demo frames=$frames -> $out '
             '${e.isEmpty ? "OK" : "ERR:$e"}');
         rp.close();
         hostQuit();
@@ -46,7 +48,7 @@ main(List<String> args) {
   });
 
   Isolate
-      .spawnUri(Uri.parse('demos/$demo.dart'), <String>['$W', '$H'], rp.sendPort)
+      .spawnUri(sibling('demos/$demo.dart'), <String>['$W', '$H'], rp.sendPort)
       .then((_) => print('RUNNER: spawned demos/$demo.dart (${W}x$H)'))
       .catchError((e) {
         print('RUNNER: spawn error: $e');

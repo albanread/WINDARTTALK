@@ -293,3 +293,26 @@ proc events {} {
     set ::dartui::events {}
     return $e
 }
+
+# ── WINDARTARM: output paths, script-relative (was a pinned E: drive) ─────────
+# The UI tests used to pass `e:/windart-talk/build/foo.png` to `ui snap`, which
+# only existed on the original author's machine. Derive it from where THIS
+# library lives instead:  <workRoot>/WINDARTTALK/tcl/dartui.tcl  ->  <workRoot>.
+# Captured at source time (inside a proc, `info script` names the caller, not us).
+# Override the destination with the WINDART_OUT environment variable.
+set ::WINDART_TCLDIR [file dirname [file normalize [info script]]]
+
+proc outdir {} {
+    if {[info exists ::env(WINDART_OUT)] && [string trim $::env(WINDART_OUT)] ne ""} {
+        set d [string trim $::env(WINDART_OUT)]
+    } else {
+        set repo [file dirname $::WINDART_TCLDIR]
+        set work [file dirname $repo]
+        set d [file join $work shots]
+    }
+    catch {file mkdir $d}
+    return $d
+}
+
+# outpng ui_find  ->  <outdir>/ui_find.png
+proc outpng {name} { return [file join [outdir] "$name.png"] }

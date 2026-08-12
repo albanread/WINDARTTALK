@@ -214,9 +214,37 @@ String classSketch(String name) {
 // for its snapshot classes. But the 1.24.3 SDK sources ARE on disk (the build's
 // extracted tree, or the pristine quarry), so we read the real class/method text
 // straight from the .dart files. First existing root wins, per file.
+// ── WINDARTARM: repo-relative path roots (was a hard-pinned E: drive) ────────
+// Everything below is derived from where THIS script lives, so the IDE runs
+// from any checkout on any machine. Expected layout:
+//   <workRoot>/WINDARTTALK/test/workspace.dart   <- this file
+//   <workRoot>/WINDARTTALK/{workspace,demos}/    <- repo content
+//   <workRoot>/{tree,sdk-1.24.3}/                <- extracted tree + quarry
+// Snapshot/PNG output goes to $WINDART_OUT, else <workRoot>/shots.
+String _dirOf(String p) {
+  var i = p.lastIndexOf('/'), j = p.lastIndexOf(r'\');
+  var k = i > j ? i : j;
+  return k > 0 ? p.substring(0, k) : p;
+}
+
+final String scriptDir = _dirOf(Platform.script.toFilePath());  // <repo>/test
+final String repoRoot = _dirOf(scriptDir);                      // <repo>
+final String workRoot = _dirOf(repoRoot);                       // <workRoot>
+final String outDir = () {
+  var o = Platform.environment['WINDART_OUT'];
+  var d = (o != null && o.trim().isNotEmpty) ? o.trim() : '$workRoot/shots';
+  try { new Directory(d).createSync(recursive: true); } catch (e) { }
+  return d;
+}();
+
+// A PNG path inside the output dir.
+String outPng(String name) => '$outDir/$name.png';
+
+// On-disk SDK source roots: the extracted build tree first, then the pristine
+// quarry. First existing root wins, per file.
 final List<String> _sdkRoots = <String>[
-  'e:/windart/tree/sdk/lib',
-  'e:/dart_origins/sdk-1.24.3/sdk/lib',
+  '$workRoot/tree/sdk/lib',
+  '$workRoot/sdk-1.24.3/sdk/lib',
 ];
 
 String _libDir(String lib) {
@@ -394,7 +422,7 @@ Future ask(String verb, arg) {
   return reply.first;
 }
 void spawnLanguage() {
-  const langSrc = r'e:\windart-talk\workspace\language.dart';
+  final langSrc = '$repoRoot/workspace/language.dart';
   var scratch = new File(Directory.systemTemp.path + r'\ws_language.dart');
   try {
     scratch.writeAsStringSync(new File(langSrc).readAsStringSync());
@@ -426,8 +454,19 @@ void spawnLanguage() {
 // the wire (dart:mirrors can't see ST classes — they have no TokenStream).
 Set<String> _stClasses = new Set<String>();
 bool _stWorldLoaded = false;
-const String _stWorldDir = r'e:\windart-talk\MACDARTV1\macdart\st\world';
-const String _stGalaxigans = r'e:\windart-talk\demos\galaxigans.mst';
+// The Smalltalk world corpus is NOT tracked in this repo (see .gitignore:
+// "the MACDART reference clone (its own repo; obtain from github separately)").
+// Point WINDART_ST_WORLD at a Windows-ported world to load one; the import
+// degrades gracefully when the directory is absent. NOTE the MACDARTV1
+// dartui-workspace branch carries the *Mac* world (97 .mst) — that is reference
+// material for porting, not a drop-in (cf. the galaxigans commit, which went
+// x64-ASM -> Mac-ST -> Windows-ST). galaxigans.mst IS in this repo and loads.
+final String _stWorldDir = () {
+  var w = Platform.environment['WINDART_ST_WORLD'];
+  if (w != null && w.trim().isNotEmpty) return w.trim();
+  return '$repoRoot/st/world';          // where a Windows world would live
+}();
+final String _stGalaxigans = '$repoRoot/demos/galaxigans.mst';
 
 void _loadStWorld() {
   if (_stWorldLoaded || _lang == null) return;
@@ -527,7 +566,7 @@ Future<String> handle(String line) async {
     case 'ping':
       return 'pong';
     case 'snap':
-      var p = arg.trim().isEmpty ? r'e:\windart-talk\build\ui.png' : arg.trim();
+      var p = arg.trim().isEmpty ? outPng('ui') : arg.trim();
       wsSnapshotFull(p);
       return 'ok:' + p;
     case 'tab':
@@ -596,7 +635,7 @@ Future<String> handle(String line) async {
       startStGame(arg.trim());
       return 'st game ' + arg.trim();
     case 'gpsnap':
-      var gp = arg.trim().isEmpty ? r'e:\windart-talk\build\gp.png' : arg.trim();
+      var gp = arg.trim().isEmpty ? outPng('gp') : arg.trim();
       return 'gpsnap: ' + gpSnap(gp);   // read the D3D offscreen pixels to a PNG
     case 'doit':
       if (_lang == null) return '(language isolate not ready)';
@@ -1572,7 +1611,7 @@ void debugRun(int stepKind) {
   rp.listen((m) { wsDebugDone(); });
 
   Isolate
-      .spawnUri(Uri.parse('debug_target.dart'), <String>[], rp.sendPort)
+      .spawnUri(Platform.script.resolve('debug_target.dart'), <String>[], rp.sendPort)
       .catchError((e) {
         ui.set('db_status', {'text': 'spawn error: $e'});
         ui.commit();
@@ -1656,9 +1695,13 @@ void _gameFrame(List msg) {
     var first = (cmds is List && cmds.isNotEmpty && cmds[0] is List && cmds[0].isNotEmpty) ? cmds[0][0] : null;
     if (first == 'gpopen') {
       var o = cmds[0];
-      gpOpen(o[1], o[2], o[3], o[4], 0);
+      // WINDARTARM: honour the MODE the driver sent. language.dart emits
+      // ['gpopen', w, h, ww, wh, 1] for a `'direct': true` game; this dropped
+      // o[5] and always passed 0, so the engine was never told a game wanted
+      // the direct framebuffer.
+      gpOpen(o[1], o[2], o[3], o[4], (o.length > 5 && o[5] is int) ? o[5] : 0);
       gameOpened = true;
-      if (cmds.length > 1) gpApply(cmds.sublist(1));   // apply the initial frame's draw commands
+      if (cmds.length > 1) _gpReport(gpApply(cmds.sublist(1)));
       gameFrames++;
       gameSchedule();
       return;
@@ -1666,9 +1709,23 @@ void _gameFrame(List msg) {
     gpOpen(gpW, gpH, gpW, gpH, 0);
     gameOpened = true;
   }
-  gpApply(cmds);                                  // apply + render_present + swapchain Present
+  _gpReport(gpApply(cmds));   // apply + render_present + swapchain Present
   gameFrames++;
   gameSchedule();
+}
+
+// WINDARTARM: gpApply answers "" or the FIRST error of the batch, and both call
+// sites used to discard it — so an op the engine rejected (an unknown verb, a
+// shader that will not compile, a sprite out of sequence) failed completely
+// silently and showed up only as something missing on screen. Report each
+// DISTINCT message once: a bad op usually repeats every frame, so printing
+// unconditionally would bury the log at 60 Hz.
+Set<String> _gpSeenErrs = new Set<String>();
+void _gpReport(e) {
+  if (e == null) return;
+  var s = e.toString();
+  if (s.isEmpty || !_gpSeenErrs.add(s)) return;
+  print('GPERR: $s');
 }
 
 void startStGame(String name) {
@@ -1702,7 +1759,7 @@ void startGame(String name) {
     if (rp != gameRp || msg is! List) return;     // stale/late frame from a prior run
     _gameFrame(msg);
   });
-  Isolate.spawnUri(Uri.parse('demos/$name.dart'), <String>['$gpW', '$gpH'], rp.sendPort)
+  Isolate.spawnUri(Platform.script.resolve('demos/$name.dart'), <String>['$gpW', '$gpH'], rp.sendPort)
       .then((iso) { gameIso = iso; })
       .catchError((e) { print('GAME: spawn error $name: $e'); });
 }
@@ -1718,7 +1775,16 @@ void buildGame() {
   var gx = 204;
   ui.game('gp', frame: <int>[gx, 60, W - gx - 12, H - 72]); track('gp');
   ui.commit();
-  startGame(gameSel);
+  // WINDARTARM: only re-launch a DART game on a tab rebuild. `gameSel` also
+  // holds the name when a SMALLTALK game is running (startStGame sets it), and
+  // handing that to the Dart spawner threw
+  //   IsolateSpawnException: Could not load ".../demos/<StName>.dart"
+  // on every single ST game launch — the file does not exist, because an ST
+  // game lives in the image, not in demos/. Worse, startGame() opens with
+  // stopGame(), so this also tore down the ST game it had just started.
+  // An ST game keeps streaming frames from the language isolate across a tab
+  // rebuild, so there is nothing to re-launch here.
+  if (!_stGameActive && gameSel.isNotEmpty) startGame(gameSel);
 }
 
 // ── Inspect tab (T10): the Smalltalk object inspector ─────────────────────────
@@ -1921,7 +1987,7 @@ void buildStDebug() {
 // .mst here makes it APPEAR in the gallery — this is the "rolling support".
 List<String> catApps = <String>[];                       // apps -> plain class names
 List<List<String>> catGames = <List<String>>[], catDemos = <List<String>>[];  // [name, description]
-String catPathText = r'e:\windart-talk\MACDARTV1\macdart\st\world\81_appui.mst';
+String catPathText = '$_stWorldDir/81_appui.mst';
 
 List<String> _toStrList(x) => (x is List) ? x.map((e) => e.toString()).toList() : <String>[];
 // games/demos answer [name, description, file] tuples; keep name (launch key) + description.
@@ -2073,7 +2139,7 @@ void relayout(int w, int h) {
 }
 
 void snap(String name) {
-  var e = ui.snapshot('e:/windart/build/$name.png');
+  var e = ui.snapshot(outPng(name));
   print('SNAP: $name ${e.isEmpty ? "OK" : "ERR:$e"}');
 }
 
@@ -2346,7 +2412,18 @@ main(List<String> args) {
       print('APP: keypad built, $keys key widgets');
     }); t += 450;
     new Timer(new Duration(milliseconds: t), () {
-      calc.press('7', ui); calc.press('+', ui); calc.press('5', ui); calc.press('=', ui);   // -> 12
+      // The App pane's keypad is a SMALLTALK app materialised over the C4
+      // 'appui' bridge (buildApp -> ask('appbuild')), so `calc` is only non-null
+      // once `ui apprun <StClass>` has started one. Driving it unconditionally
+      // threw NoSuchMethodError on null and killed the UI isolate, aborting every
+      // later step (including the game-pane captures). Guard it: exercise the
+      // keypad when an app is live, always snapshot the tab.
+      if (calc != null) {
+        calc.press('7', ui); calc.press('+', ui); calc.press('5', ui); calc.press('=', ui);  // -> 12
+        print('APP: 7+5= -> keypad driven');
+      } else {
+        print('APP: no live app (needs `ui apprun <StClass>`); snapshotting empty pane');
+      }
       ui.commit();
       snap('tab_app');
     }); t += 450;
@@ -2372,12 +2449,12 @@ main(List<String> args) {
     // areas repaint/erase before PrintWindow — no stale pixels from a taller tab).
     new Timer(new Duration(milliseconds: t), () { dispatchMenu(202); }); t += 450;   // -> Editor (via menu id)
     new Timer(new Duration(milliseconds: t), () {
-      var e = wsSnapshotFull('e:/windart/build/polish_editor.png');
+      var e = wsSnapshotFull(outPng('polish_editor'));
       print('SNAP: polish_editor ${e.isEmpty ? "OK" : "ERR:$e"}');
     }); t += 450;
     new Timer(new Duration(milliseconds: t), () { switchTab(1); }); t += 450;        // -> Browser (rich overview)
     new Timer(new Duration(milliseconds: t), () {
-      var e = wsSnapshotFull('e:/windart/build/polish_overview.png');
+      var e = wsSnapshotFull(outPng('polish_overview'));
       print('SNAP: polish_overview ${e.isEmpty ? "OK" : "ERR:$e"}');
     }); t += 450;
 
@@ -2415,6 +2492,34 @@ main(List<String> args) {
     new Timer(new Duration(milliseconds: t), () { snap('resize_small'); }); t += 500;
     new Timer(new Duration(milliseconds: t), () { wsResizeWindow(1100, 800); }); t += 450;  // restore
 
+    // ── The BILINGUAL browser: Smalltalk classes beside the Dart ones ────────
+    // Deliberately LATE in the sequence. The ST world import is asynchronous and
+    // lands in two stages — "imported N classes" (the loader finished) and only
+    // then "N Smalltalk classes browsable" (the `smalltalk` library becomes
+    // visible to the browser). Running this right after the import reported a
+    // spurious miss. Point WINDART_ST_WORLD at a world to populate it.
+    new Timer(new Duration(milliseconds: t), () {
+      switchTab(1);
+      var si = libraryNames.indexOf('smalltalk');
+      if (si >= 0) {
+        selectLibrary(si);
+        print('ST-BROWSE: smalltalk -> ${libClasses.length} classes');
+      } else if (_stClasses.isEmpty) {
+        print('ST-BROWSE: no world configured (set WINDART_ST_WORLD)');
+      } else {
+        print('ST-BROWSE: world loaded (${_stClasses.length}) but library not '
+              'listed yet — import still settling');
+      }
+    }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { snap('browser_smalltalk'); }); t += 450;
+    // …and drill into one: a real ST class with its real .mst source.
+    new Timer(new Duration(milliseconds: t), () {
+      var ci = libClasses.indexOf('Fraction');
+      if (ci < 0 && libClasses.isNotEmpty) ci = 0;
+      if (ci >= 0) { selectLibClass(ci); print('ST-BROWSE: class ${libClasses[ci]}'); }
+    }); t += 500;
+    new Timer(new Duration(milliseconds: t), () { snap('browser_smalltalk_class'); }); t += 450;
+
     // ── Game tab: spawn a gp game in its OWN isolate, let it render frames into
     // the D3D11 pane, capture the HONEST frames (gpSnap = offscreen RT, gpSnapPresent
     // = on-screen swapchain — both independent of PrintWindow), then drive the
@@ -2422,8 +2527,8 @@ main(List<String> args) {
     new Timer(new Duration(milliseconds: t), () { switchTab(9); print('GAME: -> Game tab, spawning $gameSel'); }); t += 2200;
     new Timer(new Duration(milliseconds: t), () {
       print('GAME: $gameSel frames=$gameFrames opened=$gameOpened');
-      var a = gpSnap('e:/windart/build/game_pane.png');
-      var b = gpSnapPresent('e:/windart/build/game_present.png');
+      var a = gpSnap(outPng('game_pane'));
+      var b = gpSnapPresent(outPng('game_present'));
       print('GAME: gpSnap ${a.isEmpty ? "OK" : "ERR:$a"}  gpSnapPresent ${b.isEmpty ? "OK" : "ERR:$b"}');
       snap('tab_game');
     }); t += 450;
@@ -2432,8 +2537,8 @@ main(List<String> args) {
     new Timer(new Duration(milliseconds: t), () { startGame('tiletest'); print('GAME: -> tiletest'); }); t += 2200;
     new Timer(new Duration(milliseconds: t), () {
       print('GAME: tiletest frames=$gameFrames');
-      var a = gpSnap('e:/windart/build/game_tiletest.png');
-      var b = gpSnapPresent('e:/windart/build/game_tiletest_present.png');
+      var a = gpSnap(outPng('game_tiletest'));
+      var b = gpSnapPresent(outPng('game_tiletest_present'));
       print('GAME: tiletest gpSnap ${a.isEmpty ? "OK" : "ERR:$a"}  present ${b.isEmpty ? "OK" : "ERR:$b"}');
     }); t += 450;
     // Leaving the Game tab must stop the isolate cleanly (no crash, no bleed).

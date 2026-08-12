@@ -11,9 +11,9 @@ set app {Object subclass: HelloApp [ build: ui [ ui label: 'g' text: 'Hello from
 puts "  accept -> [ui accept $app]"
 puts "  apprun -> [ui apprun HelloApp]"
 after 1200
-puts "  snap(before) -> [ui snap e:/windart-talk/build/ui_c4_app.png]"
+puts "  snap(before) -> [ui snap [outpng ui_c4_app]]"
 puts "  click b -> [ui click b]"
 after 1200
-puts "  snap(after)  -> [ui snap e:/windart-talk/build/ui_c4_app_clicked.png]"
+puts "  snap(after)  -> [ui snap [outpng ui_c4_app_clicked]]"
 puts "\nC4: app rendered + button event fired"
 exit 0

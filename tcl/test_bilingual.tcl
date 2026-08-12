@@ -29,7 +29,7 @@ check "Dart (()=>6*7)()"  [ui doit {(() => 6 * 7)()}] 42
 
 puts "\n== full-window PNG snapshot =="
 ui tab 0
-set snap [ui snap e:/windart-talk/build/ui_bilingual.png]
+set snap [ui snap [outpng ui_bilingual]]
 puts "  snap -> $snap"
 
 if {$::fails} { puts "\nBILINGUAL GUI: SOME CHECKS FAILED"; exit 1 }

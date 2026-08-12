@@ -1356,7 +1356,13 @@ void ST_asSymbol(Dart_NativeArguments args) {
 // an fp return). The marshaller below sorts each arg into gpr/fpr/stack per the
 // procedure call standard, so this covers fp-register scalars (cblas_dgemm's
 // alpha/beta) and >8-arg spill — everything the corpus's FFI needs.
-#if defined(TARGET_ARCH_ARM64) || defined(__aarch64__)
+// WINDARTARM: MSVC has NO inline assembly at all on arm64 (no __asm__, no
+// __asm), so this GCC-style trampoline cannot compile there. Gate it out;
+// ST_ffiCall's _WIN32 branch already fails SAFE ("FFI: not yet supported"),
+// and the only call site (below) is inside its non-_WIN32 branch, so nothing
+// dangles. The real Win-arm64 trampoline is an armasm64 .asm file (sprint AS7;
+// MS arm64 ABI = AAPCS64 variant, x18 = TEB — already reserved by the VM).
+#if (defined(TARGET_ARCH_ARM64) || defined(__aarch64__)) && !defined(_MSC_VER)
 extern "C" uint64_t ffi_call_aapcs(void* fn, const uint64_t* gpr,
                                    const double* fpr, const uint64_t* stk,
                                    int64_t nstk, double* out_d0);
@@ -1403,7 +1409,7 @@ __asm__(
     "  ldp x19, x20, [sp], #16\n"
     "  ldp x29, x30, [sp], #16\n"
     "  ret\n");
-#endif  // arm64 AAPCS64 trampoline (windart/x64 stubs ST_ffiCall instead)
+#endif  // arm64 AAPCS64 trampoline (windart x64+arm64 stub ST_ffiCall instead)
 
 // The FFI floor, stage A (ST_PORTING_PLAN.md §3a): call a C function BY NAME
 // with word arguments. `stFfiCall(List args, String desc)` where desc is

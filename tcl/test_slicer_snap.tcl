@@ -5,5 +5,5 @@ connect [expr {$argc > 0 ? [lindex $argv 0] : "ws://127.0.0.1:8190/ws"}]
 after 1500
 puts "  browse STHostService -> [ui browse STHostService]"
 after 1400
-puts "  snap -> [ui snap e:/windart-talk/build/ui_slicer_sthost.png]"
+puts "  snap -> [ui snap [outpng ui_slicer_sthost]]"
 exit 0

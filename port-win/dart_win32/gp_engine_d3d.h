@@ -85,7 +85,27 @@ class GpIndexedPane {
   // through it too, so all layers agree on colour.
   ID3D11ShaderResourceView* palette_srv() const { return palette_srv_.Get(); }
 
+  // ── WINDARTARM: direct-framebuffer mode (§6b, was deferred) ───────────────
+  // Hand the ACTIVE index slot's mapped GPU memory straight to Dart as an
+  // ExternalTypedData, so a whole-frame CPU renderer (MandelZoom/MandelVM, and
+  // world/83_gamepane_direct.mst) writes indices with no staging buffer and no
+  // upload at all. Only possible because Tier 1 made these textures DYNAMIC;
+  // only cheap because this SoC has unified memory (GPU_UMA_DESIGN.md).
+  //
+  // Lifetime is ONE FRAME: D3D11 forbids holding a Map across a Draw, and
+  // WRITE_DISCARD renames the allocation, so the pointer moves every frame.
+  // UnmapDirect() is called at the frame boundary; callers must re-fetch.
+  // Returns NULL if the map fails.
+  uint8_t* MapDirect(UINT* pitch);
+  void UnmapDirect();
+  bool direct_mapped() const { return direct_mapped_; }
+  UINT direct_pitch() const { return direct_pitch_; }
+
  private:
+  bool direct_mapped_ = false;
+  UINT direct_pitch_ = 0;
+  int direct_slot_ = 0;
+  uint8_t* direct_ptr_ = NULL;
   GpGfx* gfx_;
   int world_w_, world_h_, viewport_w_, viewport_h_;
   int active_;
@@ -316,14 +336,23 @@ class GpEngine {
   // the honest "what the window shows" proof, distinct from snap()'s offscreen.
   bool snap_present(const char* path, std::string* err);
 
-  void begin_frame() {}
+  // WINDARTARM: release any direct-framebuffer mapping handed out last frame
+  // before this frame's commands run — D3D11 forbids drawing from a mapped
+  // resource, and WRITE_DISCARD renames the allocation each Map anyway.
+  void begin_frame() { if (pane_ != NULL) pane_->UnmapDirect(); }
   void render_present();
   bool snap(const char* path, std::string* err);   // offscreen -> PNG
 
   int frames_presented() const { return frames_; }
   int logical_w() const { return logical_w_; }
   int logical_h() const { return logical_h_; }
-  int direct_stride() const { return 0; }
+  // WINDARTARM: the row pitch of the mapped direct framebuffer, or 0 when no
+  // mapping is live. D3D may pad rows, so a direct renderer MUST use this
+  // rather than assuming stride == width.
+  int direct_stride() const {
+    return (pane_ != NULL && pane_->direct_mapped()) ? (int)pane_->direct_pitch()
+                                                     : 0;
+  }
 
  private:
   GpEngine();

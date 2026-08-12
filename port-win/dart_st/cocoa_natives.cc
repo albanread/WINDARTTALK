@@ -15,9 +15,11 @@
 // falls through to CocoaNativeLookup, and dart:cocoa is registered in
 // builtin.cc / dartutils.cc (see the dart:cocoa hunks in windart-port.patch).
 
+#include <stdio.h>
 #include <string.h>
 
 #include "include/dart_api.h"
+#include "win_natives.h"   // WINDARTARM: Cocoa_gp* -> Win_gp* delegation
 
 namespace dart {
 namespace bin {
@@ -137,6 +139,24 @@ Dart_NativeFunction CocoaNativeLookup(Dart_Handle name,
         entry->argument_count_ == argument_count) {
       return entry->function_;
     }
+  }
+  // WINDARTARM: the gamepane natives dart:cocoa declares are named Cocoa_gp*
+  // (cocoa.dart is shared with MACDART, where Cocoa_ IS the platform prefix).
+  // Windows implements the identical contract as Win_gp* in
+  // dart_win32/gp_natives_win.cpp — Open/Close/Apply/Snap/Stat/Backbuffer/
+  // Fullscreen, matching arities. Rewrite the prefix and let the dart:win
+  // resolver answer, rather than duplicating a table that would then need
+  // maintaining twice. Delegating also keeps the arity check (WinNativeLookup
+  // matches on name AND argument_count), so a mismatch still fails closed.
+  //
+  // Without this the ST gamepane path resolved to nothing and the embedder fell
+  // through to Builtin_DummyNative -> UNREACHABLE() (builtin_natives.cc:45),
+  // killing the VM the moment a Smalltalk game called into the pane.
+  if (strncmp(function_name, "Cocoa_gp", 8) == 0) {
+    char win_name[64];
+    snprintf(win_name, sizeof(win_name), "Win_gp%s", function_name + 8);
+    return WinNativeLookup(Dart_NewStringFromCString(win_name), argument_count,
+                           auto_setup_scope);
   }
   return NULL;
 }

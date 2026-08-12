@@ -1617,6 +1617,10 @@ stHostNewClass(svc, text) => _stHost('newClass', [text]);
 stHostAcceptClass(svc, text) => _stHost('acceptClass', [text]);
 stHostSetComment(svc, cls, text) => _stHost('setComment', [cls, text]);
 stHostRemoveClass(svc, cls) => _stHost('removeClass', [cls]);
+// WINDARTARM: 63_cocoaui_stub.mst `storeEditorClass: text` — save from inside a
+// running callback (the re-entrant-safe path that acceptEditorClass: cannot
+// take). Routed onto the same host service as the other stHost* verbs.
+stHostStoreClass(svc, text) => _stHost('storeClass', [text]);
 
 /// The Apps-player surface hook — the workspace language isolate installs a
 /// closure (verb, args) routing onto the LIVE AppSurface while an ST app runs
@@ -2037,20 +2041,47 @@ stGpDirectBlit(p, bytes) {
   }
   return p;
 }
+// ── WINDARTARM: ST sprite id -> engine id mapping ──────────────────────────
+// The engine ASSIGNS ids: gpsprite's `sprites->define(rows)` and gpspawn's
+// `sprites->place(def,x,y)` each return the next sequential id, and the verb
+// only *asserts* that the caller predicted it ("gpsprite: id out of sequence").
+// The Dart demos satisfy that by defining sprites 0,1,2,... in call order. A
+// Smalltalk game picks its OWN ids, so the very first mismatched define failed,
+// no instance was ever created, and every later placement reported
+// "gpplace: bad instance" — i.e. no sprites at all.
+//
+// So mirror the engine's counters here and translate. Definitions and instances
+// are separate namespaces engine-side, hence two maps for the one ST id.
+int _stGpNextDef = 0;
+int _stGpNextInst = 0;
+Map<int, int> _stGpDefOf = <int, int>{};    // ST id -> engine definition id
+Map<int, int> _stGpInstOf = <int, int>{};   // ST id -> engine instance id
+
+int _stGpDef(id) => _stGpDefOf.containsKey(id) ? _stGpDefOf[id] : -1;
+int _stGpInst(id) => _stGpInstOf.containsKey(id) ? _stGpInstOf[id] : -1;
+
 stGpDefineSprite(p, id, rows) {
   // ST merges define+place ("defines the pixel art and places me"): one id
-  // serves as both the definition and the instance (separate namespaces
-  // engine-side); park it offscreen until the game's first moveTo:.
-  _stGpCmds.add(<dynamic>['gpsprite', id, rows.toString()]);
-  _stGpCmds.add(<dynamic>['gpspawn', id, id, -100, -100]);
+  // serves as both the definition and the instance; park it offscreen until
+  // the game's first moveTo:.
+  var d = _stGpNextDef++;
+  var inst = _stGpNextInst++;
+  _stGpDefOf[id] = d;
+  _stGpInstOf[id] = inst;
+  _stGpCmds.add(<dynamic>['gpsprite', d, rows.toString()]);
+  _stGpCmds.add(<dynamic>['gpspawn', inst, d, -100, -100]);
   return p;
 }
 stGpSpriteColor(p, id, i, r, g, b) {
-  _stGpCmds.add(<dynamic>['gpspritepal', id, i, r, g, b]);
+  var d = _stGpDef(id);                       // palette belongs to the DEFINITION
+  if (d < 0) return p;                        // never defined — drop, don't desync
+  _stGpCmds.add(<dynamic>['gpspritepal', d, i, r, g, b]);
   return p;
 }
 stGpMoveSprite(p, id, x, y) {
-  _stGpCmds.add(<dynamic>['gpplace', id, x, y, 0, 1.0, 0.0, 1.0]);
+  var inst = _stGpInst(id);                   // placement targets the INSTANCE
+  if (inst < 0) return p;
+  _stGpCmds.add(<dynamic>['gpplace', inst, x, y, 0, 1.0, 0.0, 1.0]);
   return p;
 }
 stGpPlay(snd, preset) {
@@ -2086,6 +2117,101 @@ stGpPlayTune(tn, abc) {
 stGpRun(p) { _stGpRunning = true; _stGpPane = p; return p; }
 stGpStop(p) { _stGpRunning = false; return p; }
 
+// ── WINDARTARM: the 16 primitives 80_gamepane_wiring.mst / 63_cocoaui_stub.mst
+// ask for that this port had never defined. Their absence did not fail softly:
+// the ST flow-graph builder emitted a StaticCall to an unresolved function and
+// the VM aborted at intermediate_language.h:3345 (!function.IsNull()) the moment
+// a Smalltalk game was launched. Each maps onto a verb gpApply ALREADY
+// implements (gp_natives_win.cpp), so this is a shim layer, not new engine work.
+
+// --- sprite frames / instances -------------------------------------------
+// GamePane >> primAddFrame: id rows: hexRows — an extra animation frame on an
+// existing DEFINITION, so it maps through the definition table.
+stGpAddFrame(p, id, rows) {
+  var d = _stGpDef(id);
+  if (d < 0) return p;
+  _stGpCmds.add(<dynamic>['gpframe', d, rows.toString()]);
+  return p;
+}
+// GamePane >> primPlace: id x: x y: y frame: f — targets the INSTANCE.
+// gpplace wants 8 elements — id, x, y, frame, scale, rot, alpha. The ST face
+// exposes only the first four, so the rest take their identity values.
+stGpPlaceFrame(p, id, x, y, f) {
+  var inst = _stGpInst(id);
+  if (inst < 0) return p;
+  _stGpCmds.add(<dynamic>['gpplace', inst, x, y, f, 1.0, 0.0, 1.0]);
+  return p;
+}
+// GamePane >> primHide: id — targets the INSTANCE.
+stGpHide(p, id) {
+  var inst = _stGpInst(id);
+  if (inst < 0) return p;
+  _stGpCmds.add(<dynamic>['gphide', inst]);
+  return p;
+}
+
+// --- the per-scanline palette (the copper-bar / tractor-beam mechanism) ----
+// GamePane >> linePaletteAt: line index: i r: r g: g b: b
+stGpLinePal(p, line, i, r, g, b) {
+  _stGpCmds.add(<dynamic>['gplinepal', line, i, r, g, b]);
+  return p;
+}
+
+// --- the seven-segment text overlay ---------------------------------------
+// GamePane >> text: s x: x y: y r: r g: g b: b scale: k
+// NOTE: gptext takes x, y, string, r, g, b — the D3D11 text overlay has no
+// per-draw scale, so `k` is accepted and dropped rather than silently
+// mis-passed as a colour channel.
+stGpText(p, s, x, y, r, g, b, k) {
+  _stGpCmds.add(<dynamic>['gptext', x, y, s, r, g, b]);
+  return p;
+}
+// GamePane >> textClear
+stGpTextClear(p) { _stGpCmds.add(<dynamic>['gptextclear']); return p; }
+
+// --- the runtime-compiled background shader -------------------------------
+// GamePane >> shader: source
+// The ST world names this parameter `mslSource` because it was written against
+// Metal. On Windows the body is handed to D3DCompile, so the source must be
+// HLSL — the verb and the wire are identical, the dialect is not. A Metal body
+// arrives here as a compile error from gpshader, which is reported, not fatal.
+stGpShader(p, src) { _stGpCmds.add(<dynamic>['gpshader', src]); return p; }
+// GamePane >> shaderParam: index value: n
+stGpShaderParam(p, index, v) {
+  _stGpCmds.add(<dynamic>['gpparam', index, v]);
+  return p;
+}
+
+// --- sound: synth a preset into a slot, then fire the slot -----------------
+// Sound class >> effect: params slot: n     -> ['gpsound', slot, preset, ...]
+stGpEffect(snd, params, n) {
+  var cmd = <dynamic>['gpsound', n];
+  if (params is List) {
+    cmd.addAll(params);
+  } else if (params != null) {
+    cmd.add(params);
+  }
+  // gpsound needs at least ['gpsound', slot, preset]; give it a preset if the
+  // sheet supplied none, so a malformed sound cannot drop the whole frame.
+  if (cmd.length < 3) cmd.add('blip');
+  _stGpCmds.add(cmd);
+  return snd;
+}
+// Sound class >> playSlot: n
+stGpPlaySlot(snd, n) { _stGpCmds.add(<dynamic>['gpplay', n]); return snd; }
+
+// --- the step/reset blocks ------------------------------------------------
+// These are NOT wire verbs: the ST game hands the driver two blocks and the
+// pull-pacer invokes them per frame. ST blocks are directly callable Dart
+// closures (see the AppUI note above), so they are simply held here.
+var _stGpStepBlk;
+var _stGpResetBlk;
+stGpOnStep(p, aBlock) { _stGpStepBlk = aBlock; return p; }
+stGpOnReset(p, aBlock) { _stGpResetBlk = aBlock; return p; }
+stGpStepBlock(cls) => _stGpStepBlk;
+stGpResetBlock(cls) => _stGpResetBlk;
+stGpClearBlocks(cls) { _stGpStepBlk = null; _stGpResetBlk = null; return cls; }
+
 /// Drain and return the command buffer (the driver ships it as one
 /// `['draw', cmds]`). Answers a fresh list; the buffer restarts empty.
 List stGpTake() {
@@ -2108,6 +2234,15 @@ void stGpReset() {
   _stGpSounds = <int, bool>{};
   _stGpTunes = <String, int>{};
   _stGpNextTune = 0;
+  // WINDARTARM: the engine's sprite counters restart with a new pane, so the
+  // id mirrors must too — otherwise the next game's first define would predict
+  // the previous game's numbering and desync again.
+  _stGpNextDef = 0;
+  _stGpNextInst = 0;
+  _stGpDefOf = <int, int>{};
+  _stGpInstOf = <int, int>{};
+  _stGpStepBlk = null;
+  _stGpResetBlk = null;
 }
 
 // --- ABC notation -> flat MIDI events (the ST game wire's music half) --------

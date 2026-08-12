@@ -3,7 +3,7 @@
 // on transparent, scrolling FASTER, so the checkerboard shows between them (the
 // discs' alignment vs the checkers differs by frame => parallax). Foreground: the
 // free-draw indexed pane's ground strip + a block + HUD text, all on top.
-//   dartui.exe gp_runner.dart tiletest e:/windart/build/tile_test.png 30
+//   dartui.exe gp_runner.dart tiletest shots/tile_test.png 30
 library tiletest;
 
 import 'dart:isolate';

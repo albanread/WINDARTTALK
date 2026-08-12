@@ -1,0 +1,317 @@
+# WINDARTARM - windows-arm64 (Snapdragon) VM-core delta against pristine Dart 1.24.3.
+#
+# Companion to port-win/windart-port.patch (which stays arch-neutral + x64). Apply
+# BOTH: this file carries ONLY the arm64/Windows arch seam. Eight files, 20 hunks.
+# Every hunk was verified to compile with MSVC 14.51 (VS 18) targeting arm64 on a
+# Snapdragon X (Oryon) host - see WINDOWS_ARM64_PORTING_PLAN.md SS2.
+#
+#   platform/globals.h        - teach arch detection that MSVC spells arm64 _M_ARM64.
+#                               THE KEYSTONE: without it the build either #errors or
+#                               silently selects USING_SIMULATOR (an interpreter, not a JIT).
+#   vm/globals.h              - COPY_FP_REGISTER: arm64 joins the x64 branch.
+#   vm/atomic_win.h           - 9 gates: the Interlocked* bodies are already arm64-correct.
+#   vm/cpu_arm64.cc           - FlushICache via FlushInstructionCache. arm64's i-cache is
+#                               NOT coherent; this is the JIT-defining change (the analogue
+#                               of MACDART's sys_icache_invalidate fix).
+#   vm/cpuinfo_win.cc         - no CPUID on arm64; read the CPU name from the registry.
+#   vm/thread_interrupter_win.cc - profiler: sample Pc/Fp/Sp AND X15 (Dart's SPREG).
+#   vm/os_thread_win.cc       - stack bounds via NtCurrentTeb()->NT_TIB: no GS segment
+#                               on arm64 (found by the AS1 burn-down, not the A0 probe).
+#   third_party/double-conversion/src/utils.h - same _M_ARM64 blind spot.
+#
+# NOT in this patch (build-flag fixes, no source edit needed):
+#   /D_ARM64_NO_EXTENDED_INTRINSICS - suppresses arm64_neon.h's #define mvn(src),
+#   which collides with Assembler::mvn (assembler_arm64.h:1062 + 2 call sites).
+diff --git a/a/runtime/platform/globals.h b/b/runtime/platform/globals.h
+
+--- a/runtime/platform/globals.h
++++ b/runtime/platform/globals.h
+@@ -249,7 +249,7 @@ typedef double fpu_register_t;
+ #elif defined(__MIPSEB__)
+ #error Big-endian MIPS is not supported by Dart. Try passing -EL to your      \
+  compiler.
+-#elif defined(__aarch64__)
++#elif defined(__aarch64__) || defined(_M_ARM64)
+ #define HOST_ARCH_ARM64 1
+ #define ARCH_IS_64_BIT 1
+ #define kFpuRegisterSize 16
+diff --git a/a/runtime/third_party/double-conversion/src/utils.h b/b/runtime/third_party/double-conversion/src/utils.h
+
+--- a/runtime/third_party/double-conversion/src/utils.h
++++ b/runtime/third_party/double-conversion/src/utils.h
+@@ -76,7 +76,7 @@ inline void abort_noreturn() { abort(); }
+     defined(__sparc__) || defined(__sparc) || defined(__s390__) || \
+     defined(__SH4__) || defined(__alpha__) || \
+     defined(_MIPS_ARCH_MIPS32R2) || \
+-    defined(__AARCH64EL__) || defined(__aarch64__)
++    defined(__AARCH64EL__) || defined(__aarch64__) || defined(_M_ARM64)
+ #define DOUBLE_CONVERSION_CORRECT_DOUBLE_OPERATIONS 1
+ #elif defined(__mc68000__)
+ #undef DOUBLE_CONVERSION_CORRECT_DOUBLE_OPERATIONS
+diff --git a/a/runtime/vm/atomic_win.h b/b/runtime/vm/atomic_win.h
+
+--- a/runtime/vm/atomic_win.h
++++ b/runtime/vm/atomic_win.h
+@@ -16,7 +16,7 @@
+ namespace dart {
+ 
+ inline uintptr_t AtomicOperations::FetchAndIncrement(uintptr_t* p) {
+-#if defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   return static_cast<uintptr_t>(
+              InterlockedIncrement64(reinterpret_cast<LONGLONG*>(p))) -
+          1;
+@@ -31,7 +31,7 @@ inline uintptr_t AtomicOperations::FetchAndIncrement(uintptr_t* p) {
+ 
+ 
+ inline intptr_t AtomicOperations::FetchAndIncrement(intptr_t* p) {
+-#if defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   return static_cast<intptr_t>(
+              InterlockedIncrement64(reinterpret_cast<LONGLONG*>(p))) -
+          1;
+@@ -46,7 +46,7 @@ inline intptr_t AtomicOperations::FetchAndIncrement(intptr_t* p) {
+ 
+ 
+ inline void AtomicOperations::IncrementBy(intptr_t* p, intptr_t value) {
+-#if defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   InterlockedExchangeAdd64(reinterpret_cast<LONGLONG*>(p),
+                            static_cast<LONGLONG>(value));
+ #elif defined(HOST_ARCH_IA32)
+@@ -58,7 +58,7 @@ inline void AtomicOperations::IncrementBy(intptr_t* p, intptr_t value) {
+ 
+ 
+ inline void AtomicOperations::IncrementInt64By(int64_t* p, int64_t value) {
+-#if defined(HOST_ARCH_IA32) || defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_IA32) || defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   InterlockedExchangeAdd64(reinterpret_cast<LONGLONG*>(p),
+                            static_cast<LONGLONG>(value));
+ #else
+@@ -68,7 +68,7 @@ inline void AtomicOperations::IncrementInt64By(int64_t* p, int64_t value) {
+ 
+ 
+ inline uintptr_t AtomicOperations::FetchAndDecrement(uintptr_t* p) {
+-#if defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   return static_cast<uintptr_t>(
+              InterlockedDecrement64(reinterpret_cast<LONGLONG*>(p))) +
+          1;
+@@ -83,7 +83,7 @@ inline uintptr_t AtomicOperations::FetchAndDecrement(uintptr_t* p) {
+ 
+ 
+ inline intptr_t AtomicOperations::FetchAndDecrement(intptr_t* p) {
+-#if defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   return static_cast<intptr_t>(
+              InterlockedDecrement64(reinterpret_cast<LONGLONG*>(p))) +
+          1;
+@@ -98,7 +98,7 @@ inline intptr_t AtomicOperations::FetchAndDecrement(intptr_t* p) {
+ 
+ 
+ inline void AtomicOperations::DecrementBy(intptr_t* p, intptr_t value) {
+-#if defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   InterlockedExchangeAdd64(reinterpret_cast<LONGLONG*>(p),
+                            static_cast<LONGLONG>(-value));
+ #elif defined(HOST_ARCH_IA32)
+@@ -113,7 +113,7 @@ inline void AtomicOperations::DecrementBy(intptr_t* p, intptr_t value) {
+ inline uword AtomicOperations::CompareAndSwapWord(uword* ptr,
+                                                   uword old_value,
+                                                   uword new_value) {
+-#if defined(HOST_ARCH_X64)
++#if defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+   return static_cast<uword>(InterlockedCompareExchange64(
+       reinterpret_cast<LONGLONG*>(ptr), static_cast<LONGLONG>(new_value),
+       static_cast<LONGLONG>(old_value)));
+@@ -128,7 +128,7 @@ inline uword AtomicOperations::CompareAndSwapWord(uword* ptr,
+ inline uint32_t AtomicOperations::CompareAndSwapUint32(uint32_t* ptr,
+                                                        uint32_t old_value,
+                                                        uint32_t new_value) {
+-#if (defined(HOST_ARCH_X64) || defined(HOST_ARCH_IA32))
++#if (defined(HOST_ARCH_X64) || defined(HOST_ARCH_IA32) || defined(HOST_ARCH_ARM64))
+   return static_cast<uint32_t>(InterlockedCompareExchange(
+       reinterpret_cast<LONG*>(ptr), static_cast<LONG>(new_value),
+       static_cast<LONG>(old_value)));
+diff --git a/a/runtime/vm/cpu_arm64.cc b/b/runtime/vm/cpu_arm64.cc
+
+--- a/runtime/vm/cpu_arm64.cc
++++ b/runtime/vm/cpu_arm64.cc
+@@ -11,7 +11,7 @@
+ #include "vm/cpuinfo.h"
+ #include "vm/simulator.h"
+ 
+-#if !defined(USING_SIMULATOR)
++#if !defined(USING_SIMULATOR) && !defined(HOST_OS_WINDOWS)
+ #include <sys/syscall.h> /* NOLINT */
+ #include <unistd.h>      /* NOLINT */
+ #endif
+@@ -32,7 +32,15 @@ void CPU::FlushICache(uword start, uword size) {
+ 
+ // ARM recommends using the gcc intrinsic __clear_cache on Linux and Android.
+ // blogs.arm.com/software-enablement/141-caches-and-self-modifying-code/
+-#if defined(HOST_OS_ANDROID) || defined(HOST_OS_FUCHSIA) ||                    \
++#if defined(HOST_OS_WINDOWS)
++  // WINDARTARM: arm64's i-cache is NOT coherent with the d-cache (unlike x64,
++  // where cpu_x64.cc's FlushICache is a documented no-op). Every JIT code write
++  // and every code_patcher_arm64 self-modification must be published to the
++  // i-cache or the CPU may execute stale bytes. FlushInstructionCache is the
++  // Win32 equivalent of Linux's __clear_cache / Darwin's sys_icache_invalidate.
++  ::FlushInstructionCache(::GetCurrentProcess(),
++                          reinterpret_cast<void*>(start), size);
++#elif defined(HOST_OS_ANDROID) || defined(HOST_OS_FUCHSIA) ||                  \
+     defined(HOST_OS_LINUX)
+   extern void __clear_cache(char*, char*);
+   char* beg = reinterpret_cast<char*>(start);
+diff --git a/a/runtime/vm/cpuinfo_win.cc b/b/runtime/vm/cpuinfo_win.cc
+
+--- a/runtime/vm/cpuinfo_win.cc
++++ b/runtime/vm/cpuinfo_win.cc
+@@ -19,11 +19,36 @@ namespace dart {
+ CpuInfoMethod CpuInfo::method_ = kCpuInfoDefault;
+ const char* CpuInfo::fields_[kCpuInfoMax] = {0};
+ 
++#if defined(HOST_ARCH_ARM64)
++// WINDARTARM: arm64 has no CPUID instruction, so cpuid.h compiles CpuId down to
++// a stub whose field() returns NULL. A NULL model string then trips
++// HostCPUFeatures::Cleanup()'s ASSERT(hardware_ != NULL) in cpu_arm64.cc, and
++// leaves the Observatory/workspace VM tab with no CPU name. Windows publishes
++// the CPU name in the registry for every architecture -- on a Snapdragon X this
++// reads e.g. "Snapdragon(R) X Elite - X1E78100 - Qualcomm(R) Oryon(TM) CPU".
++// Caller owns the result, matching CpuId::field()'s contract.
++static const char* WindartArmCpuModel() {
++  char buf[256];
++  DWORD size = sizeof(buf);
++  if (::RegGetValueA(HKEY_LOCAL_MACHINE,
++                     "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
++                     "ProcessorNameString", RRF_RT_REG_SZ, NULL, buf,
++                     &size) == ERROR_SUCCESS) {
++    return strdup(buf);
++  }
++  return strdup("arm64");
++}
++#endif  // defined(HOST_ARCH_ARM64)
++
+ void CpuInfo::InitOnce() {
++#if defined(HOST_ARCH_ARM64)
++  method_ = kCpuInfoSystem;  // WINDARTARM: registry, not cpuid.
++#else
+   method_ = kCpuInfoCpuId;
+ 
+   // Initialize the CpuId information.
+   CpuId::InitOnce();
++#endif
+ 
+   fields_[kCpuInfoProcessor] = "Processor";
+   fields_[kCpuInfoModel] = "Hardware";
+@@ -34,19 +59,32 @@ void CpuInfo::InitOnce() {
+ 
+ 
+ void CpuInfo::Cleanup() {
++#if !defined(HOST_ARCH_ARM64)
+   CpuId::Cleanup();
++#endif
+ }
+ 
+ 
+ bool CpuInfo::FieldContains(CpuInfoIndices idx, const char* search_string) {
+   ASSERT(method_ != kCpuInfoDefault);
++#if defined(HOST_ARCH_ARM64)
++  const char* field = WindartArmCpuModel();
++  const bool result = (strstr(field, search_string) != NULL);
++  free(const_cast<char*>(field));
++  return result;
++#else
+   return strstr(CpuId::field(idx), search_string);
++#endif
+ }
+ 
+ 
+ const char* CpuInfo::ExtractField(CpuInfoIndices idx) {
+   ASSERT(method_ != kCpuInfoDefault);
++#if defined(HOST_ARCH_ARM64)
++  return WindartArmCpuModel();
++#else
+   return CpuId::field(idx);
++#endif
+ }
+ 
+ 
+diff --git a/a/runtime/vm/globals.h b/b/runtime/vm/globals.h
+
+--- a/runtime/vm/globals.h
++++ b/runtime/vm/globals.h
+@@ -110,7 +110,7 @@ static const uword kZapUninitializedWord = 0xabababababababab;
+   __asm { mov fp, ebp}                                                         \
+   ;  // NOLINT
+ // clang-format on
+-#elif defined(HOST_ARCH_X64)
++#elif defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64)
+ // We don't have the asm equivalent to get at the frame pointer on
+ // windows x64, return the stack pointer instead.
+ #define COPY_FP_REGISTER(fp) fp = Thread::GetCurrentStackPointer();
+diff --git a/a/runtime/vm/thread_interrupter_win.cc b/b/runtime/vm/thread_interrupter_win.cc
+
+--- a/runtime/vm/thread_interrupter_win.cc
++++ b/runtime/vm/thread_interrupter_win.cc
+@@ -5,6 +5,9 @@
+ #include "platform/globals.h"
+ #if defined(HOST_OS_WINDOWS)
+ 
++#if defined(TARGET_ARCH_ARM64)
++#include "vm/constants_arm64.h"  // WINDARTARM: SPREG - arm64's Dart stack pointer
++#endif
+ #include "vm/flags.h"
+ #include "vm/os.h"
+ #include "vm/profiler.h"
+@@ -31,6 +34,10 @@ class ThreadInterrupterWin : public AllStatic {
+     // On X64, CONTEXT_CONTROL includes Rip and Rsp. Rbp is classified
+     // as an "integer" register.
+     context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
++#elif defined(HOST_ARCH_ARM64)
++    // WINDARTARM: CONTEXT_CONTROL gives Pc/Sp/Fp/Lr; CONTEXT_INTEGER gives
++    // X0..X28 - and we need X15, which is Dart's SPREG (see below).
++    context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+ #else
+ #error Unsupported architecture.
+ #endif
+@@ -45,6 +52,18 @@ class ThreadInterrupterWin : public AllStatic {
+       state->fp = static_cast<uintptr_t>(context.Rbp);
+       state->csp = static_cast<uintptr_t>(context.Rsp);
+       state->dsp = static_cast<uintptr_t>(context.Rsp);
++#elif defined(HOST_ARCH_ARM64)
++      // WINDARTARM: arm64 Dart runs on TWO stack pointers - the hardware SP
++      // (CSP == R31) for the C++ world, and R15 (SPREG) as the Dart stack
++      // pointer (constants_arm64.h:115; Assembler::EnterFrame keeps CSP a page
++      // below SP and 16-byte aligned). csp and dsp are therefore DIFFERENT
++      // registers here, exactly as signal_handler_linux.cc's
++      // GetDartStackPointer reads mcontext.regs[SPREG] on arm64. Reporting Sp
++      // for dsp would make every Dart stack walk in the profiler fail.
++      state->pc = static_cast<uintptr_t>(context.Pc);
++      state->fp = static_cast<uintptr_t>(context.Fp);
++      state->csp = static_cast<uintptr_t>(context.Sp);
++      state->dsp = static_cast<uintptr_t>(context.X[SPREG]);
+ #else
+ #error Unsupported architecture.
+ #endif
+diff --git a/a/runtime/vm/os_thread_win.cc b/b/runtime/vm/os_thread_win.cc
+--- a/runtime/vm/os_thread_win.cc
++++ b/runtime/vm/os_thread_win.cc
+@@ -177,7 +177,16 @@ bool OSThread::GetCurrentStackBounds(uword* lower, uword* upper) {
+ // On Windows stack limits for the current thread are available in
+ // the thread information block (TIB). Its fields can be accessed through
+ // FS segment register on x86 and GS segment register on x86_64.
+-#ifdef _WIN64
++#if defined(_M_ARM64)
++  // WINDARTARM: there is no GS segment on arm64 — the TEB lives in x18, which
++  // is exactly what NtCurrentTeb() compiles to (winnt.h defines it as a read
++  // of register 18 under _M_ARM64). The TEB's leading NT_TIB carries the same
++  // StackBase/StackLimit fields on every architecture, so read them through
++  // the portable accessor instead of a segment-register intrinsic.
++  NT_TIB* tib = reinterpret_cast<NT_TIB*>(NtCurrentTeb());
++  *upper = reinterpret_cast<uword>(tib->StackBase);
++  *lower = reinterpret_cast<uword>(tib->StackLimit);
++#elif defined(_WIN64)
+   *upper = static_cast<uword>(__readgsqword(offsetof(NT_TIB64, StackBase)));
+   *lower = static_cast<uword>(__readgsqword(offsetof(NT_TIB64, StackLimit)));
+ #else

@@ -17,7 +17,16 @@ connect [expr {$argc > 0 ? [lindex $argv 0] : "ws://127.0.0.1:8181/ws"}]
 ::dartui::resolveUi
 puts "== C2: the Smalltalk world is browsable over the wire =="
 
-set imp [ui stimport e:/windart-talk/MACDARTV1/macdart/st/world]
+# The ST world corpus is a SEPARATE repo (MACDARTV1, obtained from github) and
+# may be absent — stimport degrades gracefully. Override with WINDART_ST_WORLD;
+# otherwise look beside this checkout: <workRoot>/MACDARTV1/macdart/st/world.
+if {[info exists ::env(WINDART_ST_WORLD)] && [string trim $::env(WINDART_ST_WORLD)] ne ""} {
+    set stworld [string trim $::env(WINDART_ST_WORLD)]
+} else {
+    set work [file dirname [file dirname $::WINDART_TCLDIR]]
+    set stworld [file join $work MACDARTV1 macdart st world]
+}
+set imp [ui stimport $stworld]
 puts "  stimport -> [string range $imp 0 110]"
 has "classes"    [ui classes {}]                 OrderedCollection
 has "members OC" [ui members OrderedCollection]  {do:}

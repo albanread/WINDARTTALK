@@ -137,10 +137,26 @@ void Win_gpApply(Dart_NativeArguments args) {
     if (op == NULL) continue;
     std::string verr;
 
-    if (strcmp(op, "gppal") == 0 && cn >= 5) {
+    // WINDARTARM: 'gpdpal' is direct mode's palette verb (cocoa.dart's
+    // stGpDirectPal). The direct framebuffer shares the indexed pane's palette
+    // — same 8-bit index space, same lookup shader — so it is literally the
+    // same operation under a second name, not a parallel one. Without this the
+    // 256 palette ops a direct game emits at startup were dropped as unknown.
+    if ((strcmp(op, "gppal") == 0 || strcmp(op, "gpdpal") == 0) && cn >= 5) {
+      // The two verbs share the palette but NOT the legal index range. 0..15
+      // are reserved in the indexed pane's convention, but direct mode has no
+      // reserved low range — world/45_mandelzoom.mst says so explicitly and
+      // starts at 0 ("Direct mode has no reserved low range (that was an
+      // indexed-pane convention), so this starts at 0, not 16"). Folding the
+      // verbs without splitting the bound silently dropped every direct game's
+      // entry 0 — for MandelZoom, the interior colour of the set.
+      const bool direct_pal = (strcmp(op, "gpdpal") == 0);
+      const int64_t lo = direct_pal ? 0 : 16;
       int64_t i = ElInt(c, 1);
-      if (i < 16 || i > 255) verr = "gppal: index must be 16..255";
-      else pane->set_rgb((uint8_t)i, ClampByte(ElInt(c, 2)),
+      if (i < lo || i > 255) {
+        verr = direct_pal ? "gpdpal: index must be 0..255"
+                          : "gppal: index must be 16..255";
+      } else pane->set_rgb((uint8_t)i, ClampByte(ElInt(c, 2)),
                          ClampByte(ElInt(c, 3)), ClampByte(ElInt(c, 4)));
     } else if (strcmp(op, "gplinepal") == 0 && cn >= 6) {
       int64_t line = ElInt(c, 1), i = ElInt(c, 2);
@@ -403,9 +419,43 @@ void Win_gpFullscreen(Dart_NativeArguments args) {
   Dart_SetReturnValue(args, Dart_Null());
 }
 
-// _gpBackbuffer() -> null (direct framebuffer mode deferred, S6b).
+// _gpBackbuffer() -> Uint8List over the ACTIVE index slot's mapped GPU memory,
+// or null when the pane is closed / the map fails.
+//
+// WINDARTARM (§6b, previously deferred + GPU_UMA_DESIGN.md Tier 2): this SoC
+// has unified memory, so the pointer Dart writes through IS the memory the GPU
+// samples — no staging buffer, no upload. Measured 5.7-19.4x faster than the
+// UpdateSubresource path this replaces.
+//
+// CONTRACT — the handle is valid for ONE FRAME. D3D11 forbids holding a Map
+// across a Draw, and WRITE_DISCARD renames the allocation, so the address moves
+// every frame. GpEngine::begin_frame() unmaps at the frame boundary and
+// GpIndexedPane::render() unmaps defensively before drawing. Callers must
+// re-fetch each frame (cocoa.dart's stGpDirectBlit already does: it calls
+// gpBackbuffer() on every blit). Retaining the list across a frame and writing
+// through it is undefined — the same rule the Dart-side doc states.
+//
+// No finalizer is attached: the memory is owned by D3D and released by Unmap,
+// never by Dart.
 void Win_gpBackbuffer(Dart_NativeArguments args) {
-  Dart_SetReturnValue(args, Dart_Null());
+  GpEngine* eng = GpEngine::instance();
+  GpIndexedPane* pane = eng->is_open() ? eng->pane() : NULL;
+  if (pane == NULL) {
+    Dart_SetReturnValue(args, Dart_Null());
+    return;
+  }
+  UINT pitch = 0;
+  uint8_t* p = pane->MapDirect(&pitch);
+  if (p == NULL) {
+    Dart_SetReturnValue(args, Dart_Null());
+    return;
+  }
+  // Length spans whole rows including any padding, so an index written at
+  // y*stride + x is always inside the buffer. Dart reads direct_stride()
+  // (gpStat()[6]) to walk it.
+  const intptr_t len = (intptr_t)pitch * (intptr_t)pane->world_h();
+  Dart_SetReturnValue(
+      args, Dart_NewExternalTypedData(Dart_TypedData_kUint8, p, len));
 }
 
 }  // namespace bin

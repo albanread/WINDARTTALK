@@ -11,7 +11,10 @@ main() {
   print('platform.executable nonEmpty = ${Platform.executable.isNotEmpty}');
 
   // --- File write / read / length ---
-  var path = 'e:/windart/test/_io_probe.txt';
+  // WINDARTARM: de-pinned — probe beside this script, not on a fixed drive.
+  var here = Platform.script.toFilePath();
+  var testDir = here.substring(0, here.lastIndexOf(Platform.pathSeparator));
+  var path = '$testDir${Platform.pathSeparator}_io_probe.txt';
   var f = new File(path);
   f.writeAsStringSync('windart io works\nsecond line\n');
   var content = f.readAsStringSync();
@@ -20,13 +23,14 @@ main() {
   print('file existsSync = ${f.existsSync()}');
 
   // --- Directory listing ---
-  var dir = new Directory('e:/windart/port-win');
+  // WINDARTARM: de-pinned — list this test directory (relative to the script).
+  var dir = new Directory(testDir);
   var names = dir
       .listSync()
       .map((e) => e.path.split(new RegExp(r'[\\/]')).last)
       .toList();
   names.sort();
-  print('port-win entries = ${names.length}; first5 = ${names.take(5).join(", ")}');
+  print('test entries = ${names.length}; first5 = ${names.take(5).join(", ")}');
 
   // --- stdout / stderr ---
   stdout.writeln('stdout.writeln works');

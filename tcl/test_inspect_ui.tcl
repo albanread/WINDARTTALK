@@ -8,17 +8,17 @@ puts "== C6: Smalltalk object Inspector =="
 
 puts "  uinspect Fraction   -> [ui uinspect {Fraction numerator: 22 denominator: 7}]"
 after 900
-puts "  snap                -> [ui snap e:/windart-talk/build/ui_inspect_fraction.png]"
+puts "  snap                -> [ui snap [outpng ui_inspect_fraction]]"
 
 puts "  uinspsel 1 (numer.) -> [ui uinspsel 1]"
 after 400
 puts "  uinspdive           -> [ui uinspdive]"
 after 700
-puts "  snap                -> [ui snap e:/windart-talk/build/ui_inspect_dive.png]"
+puts "  snap                -> [ui snap [outpng ui_inspect_dive]]"
 puts "  uinspback           -> [ui uinspback]"
 after 400
 
 puts "  uinspect OrderedColl -> [ui uinspect {OrderedCollection withAll: #(10 20 30)}]"
 after 900
-puts "  snap                -> [ui snap e:/windart-talk/build/ui_inspect_oc.png]"
+puts "  snap                -> [ui snap [outpng ui_inspect_oc]]"
 exit 0

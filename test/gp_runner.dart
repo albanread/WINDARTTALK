@@ -6,13 +6,15 @@
 // frames we gpSnap() the offscreen to a PNG and quit. Self-drives headlessly
 // (no keys held — the games render their attract/idle scene).
 //
-//   dartui.exe gp_runner.dart 12_copper e:/windart/build/game_copper.png 60
+//   dartui.exe gp_runner.dart 12_copper shots/game_copper.png 60
+// With no <outPng> the capture lands in the shared output dir (see wsout.dart).
 import 'dart:win';
 import 'dart:isolate';
+import 'wsout.dart';
 
 main(List<String> args) {
   var game = args.length > 0 ? args[0] : '12_copper';
-  var outPng = args.length > 1 ? args[1] : 'e:/windart/build/game_$game.png';
+  var out = args.length > 1 ? args[1] : outPng('game_$game');
   var target = args.length > 2 ? int.parse(args[2]) : 60;
   const int W = 424, H = 240;
 
@@ -59,8 +61,8 @@ main(List<String> args) {
       frames++;
       if (frames >= target) {
         done = true;
-        var e = gpSnap(outPng);
-        print('GAME: SNAP $game frames=$frames -> $outPng '
+        var e = gpSnap(out);
+        print('GAME: SNAP $game frames=$frames -> $out '
             '${e.isEmpty ? "OK" : "ERR:$e"}');
         rp.close();
         gpClose();
@@ -72,7 +74,7 @@ main(List<String> args) {
   });
 
   Isolate
-      .spawnUri(Uri.parse('demos/$game.dart'), <String>['$W', '$H'], rp.sendPort)
+      .spawnUri(sibling('demos/$game.dart'), <String>['$W', '$H'], rp.sendPort)
       .catchError((e) {
         print('GAME: spawn error: $e');
         hostQuit();

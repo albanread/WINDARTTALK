@@ -29,10 +29,35 @@ if(NOT MSVC)
   message(FATAL_ERROR "WINDART S1 targets MSVC only (VS 2026 / cl 19.50). No clang-cl.")
 endif()
 
+# --- Target architecture (WINDARTARM) ---------------------------------------
+# Derived from the MSVC toolchain actually in use (vcvars64 vs vcvarsarm64), so
+# the arch can never disagree with the compiler. -DWINDART_ARCH is accepted only
+# to ASSERT intent: a mismatch is fatal, not a switch. (ARM64EC is deliberately
+# not matched — it is the x64-compatible ABI, the wrong target for a JIT that
+# emits real arm64.)
+if(MSVC_CXX_ARCHITECTURE_ID STREQUAL "ARM64")
+  set(_windart_arch_detected arm64)
+else()
+  set(_windart_arch_detected x64)
+endif()
+set(WINDART_ARCH "${_windart_arch_detected}" CACHE STRING "target arch: x64 | arm64")
+if(NOT WINDART_ARCH STREQUAL _windart_arch_detected)
+  message(FATAL_ERROR "WINDART_ARCH=${WINDART_ARCH} but the compiler targets "
+          "${_windart_arch_detected} — run the matching vcvars (vcvars64.bat / "
+          "vcvarsarm64.bat) or drop the -D.")
+endif()
+message(STATUS "WINDART arch: ${WINDART_ARCH} (MSVC_CXX_ARCHITECTURE_ID=${MSVC_CXX_ARCHITECTURE_ID})")
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 set(WINDART_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
-set(TREE   e:/windart-talk/tree)            # extracted + (S1: pristine) source tree
+# The extracted + patched source tree (extract.py DEST). De-pinned (WINDARTARM):
+# defaults to <workroot>/tree beside the repo clone; override with -DWINDART_TREE.
+get_filename_component(_windart_default_tree
+                       "${CMAKE_CURRENT_SOURCE_DIR}/../../tree" ABSOLUTE)
+set(WINDART_TREE "${_windart_default_tree}" CACHE PATH
+    "extracted + patched Dart source tree (extract.py DEST)")
+set(TREE   ${WINDART_TREE})
 set(RT     ${TREE}/runtime)
 set(SDKLIB ${TREE}/sdk/lib)
 set(PORT   ${WINDART_ROOT})                 # generators live beside this file
@@ -56,8 +81,18 @@ file(MAKE_DIRECTORY ${GEN})
 #     zlib user left once filter.cc is excluded. That define is local to main.cc's
 #     preprocessor and does not touch the engine ABI or the JIT/AOT-runtime split,
 #     which is gated by the separate DART_PRECOMPILED_RUNTIME, left undefined.)
+if(WINDART_ARCH STREQUAL "arm64")
+  add_compile_definitions(
+    TARGET_ARCH_ARM64
+    # arm64_neon.h (via <intrin.h>) defines `mvn(src)` as a macro, colliding
+    # with Assembler::mvn (assembler_arm64.h:1062). Documented opt-out for the
+    # short NEON aliases; kills the whole class (arm64 plan §2.6).
+    _ARM64_NO_EXTENDED_INTRINSICS
+  )
+else()
+  add_compile_definitions(TARGET_ARCH_X64)
+endif()
 add_compile_definitions(
-  TARGET_ARCH_X64
   DART_IO_SECURE_SOCKET_DISABLED
 )
 # Windows / MSVC conformance + CRT quieting. globals.h also self-defines the
@@ -134,7 +169,8 @@ function(dart_sources outvar kind)
     list(APPEND args --gypi ${g})
   endforeach()
   execute_process(
-    COMMAND ${Python3_EXECUTABLE} ${PORT}/gen_sources.py --kind ${kind} ${args}
+    COMMAND ${Python3_EXECUTABLE} ${PORT}/gen_sources.py
+            --kind ${kind} --arch ${WINDART_ARCH} ${args}
     OUTPUT_VARIABLE _out RESULT_VARIABLE _rc)
   if(NOT _rc EQUAL 0)
     message(FATAL_ERROR "gen_sources.py failed (${_rc}) for: ${ARGN}")
@@ -212,9 +248,9 @@ dart_sources(VM_CC cc
   ${RT}/vm/service_sources.gypi
   ${RT}/platform/platform_sources.gypi)
 # Allocator variant: no tcmalloc/jemalloc on Windows, so malloc_hooks_unsupported.cc
-# is our real MallocHooks impl. Drop the tcmalloc/jemalloc backends and the x64
-# stack-walker (used only by those backends).
-list(FILTER VM_CC EXCLUDE REGEX "malloc_hooks_(tcmalloc|jemalloc|x64)\\.cc$")
+# is our real MallocHooks impl. Drop the tcmalloc/jemalloc backends and the
+# per-arch stack-walker (used only by those backends; the arch filter KEPT it).
+list(FILTER VM_CC EXCLUDE REGEX "malloc_hooks_(tcmalloc|jemalloc|${WINDART_ARCH})\\.cc$")
 
 # Core-library native methods (the .cc in runtime/lib/*_sources.gypi).
 file(GLOB LIB_GYPI ${RT}/lib/*_sources.gypi)

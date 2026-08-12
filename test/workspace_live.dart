@@ -3,6 +3,7 @@
 // running VM via Dart_EvaluateExpr, showing the result below.
 import 'dart:win';
 import 'dart:async';
+import 'wsout.dart';
 
 // lexDart — ported verbatim (syntax runs: 1 kw, 2 str, 3 comment, 4 num, 5 type).
 final Set<String> _kw = new Set<String>.from(<String>[
@@ -70,7 +71,7 @@ main(List<String> args) {
   new Timer(new Duration(milliseconds: 350), () {
     highlight();
     doIt();                                          // one sample eval so it's not empty
-    var e = ui.snapshot(args.isNotEmpty ? args[0] : 'e:/windart/build/workspace_live.png');
+    var e = ui.snapshot(args.isNotEmpty ? args[0] : outPng('workspace_live'));
     print('LIVE: window up, snapshot ${e.isEmpty ? "OK" : "ERR:$e"} — staying open (interactive).');
     // NO hostQuit — the window stays open and the Do It button is live.
   });

@@ -4,13 +4,14 @@
 // deferred — read-only from the class table is the first-slice proof). Verified
 // headlessly by Win_surfaceSnapshot (PrintWindow -> PNG).
 //
-//   dartui.exe workspace_shell.dart e:/windart/build/workspace_shell.png
+//   dartui.exe workspace_shell.dart [out.png]   (default: <workRoot>/shots/workspace_shell.png)
 import 'dart:win';
 import 'dart:mirrors';
 import 'dart:async';
+import 'wsout.dart';
 
 main(List<String> args) {
-  var out = args.isNotEmpty ? args[0] : 'e:/windart/build/workspace_shell.png';
+  var out = args.isNotEmpty ? args[0] : outPng('workspace_shell');
 
   // ── read-only class-browser data from the VM class table (via mirrors) ──────
   var classMirrors = <String, ClassMirror>{};

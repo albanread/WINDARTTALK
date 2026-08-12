@@ -1,7 +1,7 @@
 // KEY ECHO — a diagnostic demo: each row lights green + reads DOWN while its key
 // is held (g.key), proving live keyboard input reaches a gp game through the
 // runner's per-frame keyState() payload.
-//   dartui.exe game_live.dart keyecho e:/windart/build/keyecho.png selftest
+//   dartui.exe game_live.dart keyecho shots/keyecho.png selftest
 library keyecho;
 
 import 'dart:isolate';

@@ -7,7 +7,7 @@
 //   * SFX presets (jump / coin / hurt)
 // It self-plays (an AI hops the spikes and the world keeps rolling); live in the
 // Game tab, SPACE / UP make the runner jump.
-//   dartui.exe gp_runner.dart coindash e:/windart/build/coindash.png 200
+//   dartui.exe gp_runner.dart coindash shots/coindash.png 200
 library coindash;
 
 import 'dart:isolate';

@@ -24,10 +24,16 @@ import sys
 # Unit tests are never part of the shipped binaries.
 TEST_RE = re.compile(r"(_test\.(cc|h)$|_test_)")
 
-# Keep x64; drop every other architecture backend. `_arm\.`/`_arm_` matches arm
-# but not arm64 (which has its own alternative below); `simulator_*` are only
-# used when running under a guest simulator, which a native x64 host never does.
-OTHER_ARCH_RE = re.compile(r"(_ia32[\._]|_arm64[\._]|_arm[\._]|_mips[\._]|_dbc[\._]|^simulator_)")
+# Keep the target arch; drop every other backend (WINDARTARM: selectable via
+# --arch). `_arm[\._]` matches arm but not arm64 (`_arm` must be followed by
+# `.` or `_`), so the 32-bit ARM backend drops while arm64 survives — the same
+# trick both directions. `simulator_*` are only used when running under a guest
+# simulator, which a native host never does.
+ARCH_DROP = {
+    "x64":   r"(_ia32[\._]|_arm64[\._]|_arm[\._]|_mips[\._]|_dbc[\._]|^simulator_)",
+    "arm64": r"(_ia32[\._]|_x64[\._]|_arm[\._]|_mips[\._]|_dbc[\._]|^simulator_)",
+}
+OTHER_ARCH_RE = re.compile(ARCH_DROP["x64"])  # default; main() re-binds per --arch
 
 # Keep win + generic; drop the other host OSes.
 OTHER_OS_RE = re.compile(r"(_linux[\._]|_macos[\._]|_android[\._]|_fuchsia[\._]|_openbsd[\._]|_solaris[\._])")
@@ -75,9 +81,14 @@ def main(argv) -> int:
                    help="a .gypi manifest (repeatable)")
     p.add_argument("--kind", choices=["cc", "dart"], default="cc",
                    help="cc = compilable .cc; dart = .dart sources")
+    p.add_argument("--arch", choices=sorted(ARCH_DROP), default="x64",
+                   help="target architecture whose backend to KEEP")
     p.add_argument("--exclude-basename", action="append", default=[],
                    help="drop these exact basenames (repeatable)")
     args = p.parse_args(argv[1:])
+
+    global OTHER_ARCH_RE
+    OTHER_ARCH_RE = re.compile(ARCH_DROP[args.arch])
 
     exts = (".cc",) if args.kind == "cc" else (".dart",)
     seen = set()
