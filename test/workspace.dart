@@ -1670,10 +1670,18 @@ int gameFrames = 0;
 
 // Poll the live keyboard (GetAsyncKeyState -> [downMacCodes, mods], an untyped
 // list) and ship it as this frame's gamestate, so g.key(...) works in the game.
-void gameTick() { if (gameCtl != null && !gameDone) gameCtl.send(keyState()); }
+void gameTick() { if (gameCtl != null && !gameDone && !gamePaused) gameCtl.send(keyState()); }
+// The pull-pacer IS the freeze mechanism: no tick, no frame. It already stops
+// when the Game tab is not showing; `gamePaused` adds an explicit user hold.
 void gameSchedule() {
-  if (!gameDone && activeTab == 9) new Timer(new Duration(milliseconds: 16), gameTick);
+  if (!gameDone && !gamePaused && activeTab == 9) {
+    new Timer(new Duration(milliseconds: 16), gameTick);
+  }
 }
+// WINDARTARM: an explicit Pause hold, separate from the implicit tab-away
+// freeze. Both work by withholding the tick rather than by tearing anything
+// down, so the game resumes exactly where it stopped.
+bool gamePaused = false;
 
 // ── C5: run a Smalltalk game in the D3D11 game pane. The ST game runs in the
 // language isolate (GamePane launch -> stepWithKeys: -> stGpTake), pushing the
@@ -1764,17 +1772,75 @@ void startGame(String name) {
       .catchError((e) { print('GAME: spawn error $name: $e'); });
 }
 
+// WINDARTARM: the Smalltalk games, appended to the Dart demo list so BOTH
+// languages are pickable from one place. Filled from the language isolate's
+// `stgames` (each entry [name, description, available]); empty until the ST
+// world has imported, and refreshed on every Game-tab build.
+List<String> stGames = <String>[];
+void refreshStGames() {
+  if (_lang == null) return;
+  ask('stgames', '').then((r) {
+    var names = <String>[];
+    if (r is List) {
+      for (var g in r) {
+        if (g is List && g.isNotEmpty) names.add(g[0].toString());
+      }
+    }
+    if (names.length == stGames.length) return;   // no change -> no rebuild
+    stGames = names;
+    if (activeTab == 9 && ui.ticketOf('gm_list') != null) {
+      // The list is created with {'rows': n} and pulls cellAt() per row, so
+      // re-stating the count is what makes the host re-read it.
+      ui.set('gm_list', {'rows': _gameRowCount});
+      ui.commit();
+    }
+  });
+}
+// One flat list: Dart demos first, then ST games. Row index maps back by range.
+int get _gameRowCount => gpGames.length + stGames.length;
+String _gameRowLabel(int r) =>
+    (r < gpGames.length) ? gpGames[r] : '▸ ' + stGames[r - gpGames.length];
+void _gameRowSelect(int r) {
+  if (r < 0 || r >= _gameRowCount) return;
+  if (r < gpGames.length) {
+    startGame(gpGames[r]);                       // Dart demo -> its own isolate
+  } else {
+    startStGame(stGames[r - gpGames.length]);    // Smalltalk -> language isolate
+  }
+}
+
 void buildGame() {
   var W = paneW, H = paneH;
-  ui.label('gm_lbl', text: 'Game   -   pick a game; it runs in its OWN isolate, flushing frames to the D3D11 pane',
+  ui.label('gm_lbl', text: 'Game   -   pick a game (▸ = Smalltalk); it runs in its OWN isolate, flushing frames to the D3D11 pane',
       frame: <int>[12, 36, W - 24, 18]); track('gm_lbl');
-  ui.list('gm_list', frame: <int>[12, 60, 180, H - 96],
-      rowCount: () => gpGames.length, cellAt: (r) => gpGames[r],
-      onSelect: (r) { if (r >= 0 && r < gpGames.length) startGame(gpGames[r]); }); track('gm_list');
-  ui.label('gm_status', text: 'running: $gameSel', frame: <int>[12, H - 30, 180, 18]); track('gm_status');
+  ui.list('gm_list', frame: <int>[12, 60, 180, H - 126],
+      rowCount: () => _gameRowCount, cellAt: (r) => _gameRowLabel(r),
+      onSelect: _gameRowSelect); track('gm_list');
+  // Pause holds the pull-pacer (the game keeps its state); Stop tears the
+  // isolate down and closes the pane.
+  ui.button('gm_pause', title: gamePaused ? 'Resume' : 'Pause',
+      frame: <double>[12.0, (H - 92).toDouble(), 86.0, 26.0],
+      onClick: () {
+        gamePaused = !gamePaused;
+        ui.set('gm_pause', {'title': gamePaused ? 'Resume' : 'Pause'});
+        ui.set('gm_status', {'text': gameStatusText()});
+        ui.commit();
+        if (!gamePaused) gameSchedule();          // resume where it left off
+      }); track('gm_pause');
+  ui.button('gm_stop', title: 'Stop',
+      frame: <double>[104.0, (H - 92).toDouble(), 86.0, 26.0],
+      onClick: () {
+        stopGame();
+        gamePaused = false;
+        ui.set('gm_pause', {'title': 'Pause'});
+        ui.set('gm_status', {'text': gameStatusText()});
+        ui.commit();
+      }); track('gm_stop');
+  ui.label('gm_status', text: gameStatusText(), frame: <int>[12, H - 30, 180, 18]); track('gm_status');
   var gx = 204;
   ui.game('gp', frame: <int>[gx, 60, W - gx - 12, H - 72]); track('gp');
   ui.commit();
+  refreshStGames();
   // WINDARTARM: only re-launch a DART game on a tab rebuild. `gameSel` also
   // holds the name when a SMALLTALK game is running (startStGame sets it), and
   // handing that to the Dart spawner threw
@@ -1784,7 +1850,22 @@ void buildGame() {
   // stopGame(), so this also tore down the ST game it had just started.
   // An ST game keeps streaming frames from the language isolate across a tab
   // rebuild, so there is nothing to re-launch here.
-  if (!_stGameActive && gameSel.isNotEmpty) startGame(gameSel);
+  // Returning to the tab: if a game is still live (frozen by the tab-away
+  // pause, not killed), just re-arm the pacer. Only launch afresh when there
+  // is nothing running — and never hand a Smalltalk name to the Dart spawner.
+  if (!gameDone && (gameCtl != null || _stGameActive)) {
+    gameSchedule();
+  } else if (!_stGameActive && gameSel.isNotEmpty) {
+    startGame(gameSel);
+  }
+}
+
+// "running: X" / "paused: X" / "stopped" — one place, so the label, the Pause
+// button and the Stop button cannot disagree.
+String gameStatusText() {
+  if (gameDone || (gameCtl == null && !_stGameActive)) return 'stopped';
+  var kind = _stGameActive ? ' (Smalltalk)' : '';
+  return (gamePaused ? 'paused: ' : 'running: ') + gameSel + kind;
 }
 
 // ── Inspect tab (T10): the Smalltalk object inspector ─────────────────────────
@@ -2082,7 +2163,20 @@ void buildCatalog() {
 }
 
 void buildTab(int i) {
-  if (activeTab == 9 && i != 9) stopGame();   // leaving the Game tab -> stop the game isolate
+  // WINDARTARM: leaving the Game tab still STOPS the game, deliberately.
+  //
+  // Freezing instead (just letting gameSchedule() decline to arm the next tick,
+  // which it already does when activeTab != 9) looks correct and crashes: the
+  // tab switch runs clearContent(), which destroys the 'gp' surface window,
+  // while the engine keeps its swapchain bound to that HWND — the next Present
+  // faults and takes dartui down with no Dart-level error. Verified by trying
+  // it: MandelZoom, leave tab, return -> process gone.
+  //
+  // A real freeze therefore needs pane lifecycle work (close the surface on
+  // leave, reopen and re-upload on return) rather than a scheduling tweak.
+  // Until then the in-tab Pause button is the freeze: it holds the pacer
+  // without touching any window. See port-arm64/AS6_NOTES.md.
+  if (activeTab == 9 && i != 9) { stopGame(); gamePaused = false; }
   activeTab = i;
   clearContent();
   switch (i) {

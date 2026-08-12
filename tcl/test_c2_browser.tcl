@@ -23,8 +23,9 @@ puts "== C2: the Smalltalk world is browsable over the wire =="
 if {[info exists ::env(WINDART_ST_WORLD)] && [string trim $::env(WINDART_ST_WORLD)] ne ""} {
     set stworld [string trim $::env(WINDART_ST_WORLD)]
 } else {
-    set work [file dirname [file dirname $::WINDART_TCLDIR]]
-    set stworld [file join $work MACDARTV1 macdart st world]
+    # The corpus is vendored at <repo>/st/world (see st/PROVENANCE.md) — same
+    # default test/workspace.dart uses, so a fresh clone needs no configuration.
+    set stworld [file join [file dirname $::WINDART_TCLDIR] st world]
 }
 set imp [ui stimport $stworld]
 puts "  stimport -> [string range $imp 0 110]"

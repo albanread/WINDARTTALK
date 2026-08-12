@@ -254,6 +254,49 @@ it also tore down the ST game it had just started. Guarded with
 `gamepane: not open`. `Galaxigans` now runs on into gameplay (`SCORE 50`,
 `WAVE 1`, `SHIPS 3`) instead of being killed at the title screen.
 
+## 5d. Game-tab controls, and one thing that could not be done cheaply
+
+**Smalltalk games are now listed** alongside the Dart demos in one selection
+list, `▸`-prefixed, fed from the language isolate's `stgames` and refreshed on
+every Game-tab build (empty until the ST world imports). Row index maps back by
+range: below `gpGames.length` → `startGame` (Dart isolate), above →
+`startStGame` (language isolate).
+
+**Pause / Stop buttons.** Pause holds the pull-pacer — no tick, no frame —
+without touching any window, so the game resumes exactly where it stopped. Stop
+tears the isolate down and closes the pane. A single `gameStatusText()` feeds
+the label so it cannot disagree with the buttons; it names the language
+(`running: Galaxigans (Smalltalk)`).
+
+**Freeze-on-tab-away: attempted, reverted.** `gameSchedule()` already declines
+to arm the next tick unless `activeTab == 9`, so deleting the `stopGame()` on
+tab-leave *looks* like a free freeze. It is not: the tab switch runs
+`clearContent()`, which destroys the `gp` surface window, while the engine keeps
+its swapchain bound to that HWND. The next Present faults and takes dartui down
+with **no Dart-level error at all** — verified by doing it (start MandelZoom,
+leave the tab, return → process gone). Reverted to `stopGame()`.
+
+A real freeze needs pane lifecycle work — close the surface on leave, reopen and
+re-upload on return — not a scheduling tweak. Until then the in-tab **Pause**
+button is the freeze. Consequence to keep in mind: leaving the tab still ends
+the game, and returning re-launches only *Dart* games (an ST game must be
+re-picked), because `buildGame` must not hand a Smalltalk name to the Dart
+spawner.
+
+**"MandelZoom seems slow" — it is, and not because of the port.** Its `step`
+computes the entire 320×240 view every frame at `maxIter := 150`: 76,800 pixels
+× up to 150 escape iterations ≈ **11.5 M iterations per frame**, written in
+Smalltalk. 60 fps would demand ~690 M iter/s. The unified-memory work removed
+the *upload* (one `directBlit:` into shared GPU memory, now genuinely zero-copy);
+the *compute* is the game's own workload and is untouched by any of it.
+
+The most likely lever is not the GPU at all: ST `Float` arithmetic goes through
+Dart doubles, and Dart 1.24 boxes those unless the optimiser unboxes them —
+11.5 M iterations of boxed arithmetic would be dominated by allocation and GC.
+Worth measuring (`--compiler_stats`, GC counters via `wsVmStats`) before
+optimising anything, and worth comparing against the Dart `04_mandelbrot` demo
+which does the same maths natively.
+
 ## 6. Still open
 
 - Port the two gamepane-wiring files, then re-enable `test_c5_game` — the only
