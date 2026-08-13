@@ -132,8 +132,23 @@ static const HelperRewrite kHelperRewrites[] = {
     {"halt", "stHalt", 0},
     {"perform:", "stPerform1", 1},
     {"perform:withArguments:", "stPerform2", 2},
-    {"<", "stLess", 1},   {"<=", "stLessEq", 1},
-    {">", "stGreater", 1}, {">=", "stGreaterEq", 1},
+    // `<` `<=` `>` `>=` deliberately NOT here: funnelling every compare in the
+    // image through stLess/stLessEq/stGreater/stGreaterEq cost MandelZoom 4.3x.
+    // Each helper is tiny so it always inlines, but every inlined copy carries
+    // the HELPER's ICData, which has aggregated every receiver pair in the
+    // image — on arm64 SmiFitsInDouble() is false, so one Smi pair plus one
+    // Double pair is already unspecializable and the compare degrades to
+    // Box + StaticCall. Measured: an isolated double-compare loop runs 10.2ms
+    // (Dart parity); the same loop after any Smi compare has run anywhere runs
+    // 142ms — image-wide, order-dependent poisoning, the same failure the
+    // `add:` (above) and value-family (below) comments describe. As plain
+    // per-site sends all four fuse into `Branch if RelationalOp` and the ST/
+    // Dart ratio across the control-flow benchmarks is 1.01x (test/st_vs_dart).
+    // The num-receiver/ST-argument cases the funnel used to catch (`0 < (3/4)`
+    // 2-cycles through _IntegerImplementation.<'s reversal) are handled where
+    // they arise instead: the runtime lib's relational operators route a
+    // non-num argument through the coercion privates the stObjNSM hook already
+    // translates (see st-tree.patch runtime/lib hunks + cocoa.dart:181).
     {"copyFrom:to:", "stCopyFromTo", 2},
 };
 // The block-invocation family. Handled per site (LoadClassId == kClosureCid
@@ -1322,6 +1337,14 @@ Fragment StGraphBuilder::TranslateMessage(MessageNode* node) {
         Function::ZoneHandle(zone_, LookupCocoaFunction("stConcat")), 2);
     return instructions;
   }
+  // Per-site relational lowering (see IsRelational): evaluate receiver and
+  // argument once into temps, then split on the ARGUMENT's class id. Smi and
+  // Double each take a plain InstanceCall carrying THIS SITE's ICData — which
+  // the optimizer fuses into `Branch if RelationalOp` on unboxed operands —
+  // while every other argument type falls through to the shared helper, whose
+  // rare tail still handles Strings, Symbols, Characters and the num <
+  // ST-object 2-cycle. Through the funnel MandelZoom's frame ran 37.1ms; per
+  // site it runs 8.7ms against hand-written Dart's 8.4ms.
   // Per-site value-family lowering (see IsValueFamily): evaluate receiver and
   // args once into temps, then split on LoadClassId == kClosureCid — a closure
   // receiver takes a DIRECT ClosureCall (per-site: when the closure's creation

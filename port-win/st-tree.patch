@@ -305,3 +305,135 @@
      return _noSuchMethod(
          invocation.isMethod,
          internal.Symbol.getName(invocation.memberName),
+--- a/runtime/lib/integers.dart
++++ b/runtime/lib/integers.dart
+@@ -102,6 +102,18 @@
+   }
+ 
+   bool operator <(num other) {
++    // WINDART-TALK: a Smalltalk numeric (Fraction, ScaledDecimal, ...) is not
++    // a num, and the reversal below 2-cycles with the world's own reversal
++    // (`Fraction>>>` is `^aNumber < self`). Derive the answer from the ST
++    // object's FORWARD protocol instead, through the coercion privates the
++    // stObjNSM hook already translates for operator> and arithmetic — this
++    // branch is dead in optimized code (a specialized site is a RelationalOp
++    // and never calls this body), so it costs the fast path nothing.
++    if (other is! num) {
++      // this < other  <=>  !(this > other) && !(this == other)
++      return !other._greaterThanFromInteger(this) &&
++          !other._equalToInteger(this);
++    }
+     return other > this;
+   }
+ 
+@@ -110,10 +122,19 @@
+   }
+ 
+   bool operator >=(num other) {
++    // WINDART-TALK: see operator<. `this == other` is false for any ST
++    // numeric even when the values are equal, so route explicitly.
++    if (other is! num) {
++      return other._greaterThanFromInteger(this) || other._equalToInteger(this);
++    }
+     return (this == other) || (this > other);
+   }
+ 
+   bool operator <=(num other) {
++    // WINDART-TALK: see operator<.
++    if (other is! num) {
++      return !other._greaterThanFromInteger(this);
++    }
+     return (this == other) || (this < other);
+   }
+ 
+--- a/runtime/lib/double.dart
++++ b/runtime/lib/double.dart
+@@ -63,6 +63,14 @@
+   bool _equal(double other) native "Double_equal";
+   bool _equalToInteger(int other) native "Double_equalToInteger";
+   bool operator <(num other) {
++    // WINDART-TALK: a Smalltalk numeric argument 2-cycles through the reversal
++    // below (see integers.dart operator< — same shape, same fix). The coercion
++    // privates are translated to forward ST sends by the stObjNSM hook; this
++    // branch is dead in optimized code, so the fast path is untouched.
++    if (other is! num) {
++      return !other._greaterThanFromInteger(this) &&
++          !other._equalToInteger(this);
++    }
+     return other > this;
+   }
+ 
+@@ -72,10 +80,19 @@
+ 
+   bool _greaterThan(double other) native "Double_greaterThan";
+   bool operator >=(num other) {
++    // WINDART-TALK: see operator<. `this == other` is false for any ST
++    // numeric even when the values are equal, so route explicitly.
++    if (other is! num) {
++      return other._greaterThanFromInteger(this) || other._equalToInteger(this);
++    }
+     return (this == other) || (this > other);
+   }
+ 
+   bool operator <=(num other) {
++    // WINDART-TALK: see operator<.
++    if (other is! num) {
++      return !other._greaterThanFromInteger(this);
++    }
+     return (this == other) || (this < other);
+   }
+ 
+--- a/runtime/vm/method_recognizer.h
++++ b/runtime/vm/method_recognizer.h
+@@ -152,9 +152,9 @@
+   V(_Bigint, _estQuotientDigit, Bigint_estQuotientDigit, Dynamic, 0x0a2898bb)  \
+   V(_Montgomery, _mulMod, Montgomery_mulMod, Dynamic, 0x26d5b8ee)              \
+   V(_Double, >, Double_greaterThan, Bool, 0x0a202683)                          \
+-  V(_Double, >=, Double_greaterEqualThan, Bool, 0x57491a62)                    \
+-  V(_Double, <, Double_lessThan, Bool, 0x2e9d61bb)                             \
+-  V(_Double, <=, Double_lessEqualThan, Bool, 0x099e4442)                       \
++  V(_Double, >=, Double_greaterEqualThan, Bool, 0x2df1a8e3)                    \
++  V(_Double, <, Double_lessThan, Bool, 0x6896fd05)                             \
++  V(_Double, <=, Double_lessEqualThan, Bool, 0x76831143)                       \
+   V(_Double, ==, Double_equal, Bool, 0x04c399a1)                               \
+   V(_Double, +, Double_add, Double, 0x0ea5f450)                                \
+   V(_Double, -, Double_sub, Double, 0x76768546)                                \
+@@ -219,9 +219,9 @@
+   V(_IntegerImplementation, ==, Integer_equal, Bool, 0x7d51f04d)               \
+   V(_IntegerImplementation, _equalToInteger, Integer_equalToInteger, Bool,     \
+     0x063be842)                                                                \
+-  V(_IntegerImplementation, <, Integer_lessThan, Bool, 0x2e9d61bb)             \
+-  V(_IntegerImplementation, <=, Integer_lessEqualThan, Bool, 0x099e4442)       \
+-  V(_IntegerImplementation, >=, Integer_greaterEqualThan, Bool, 0x57491a62)    \
++  V(_IntegerImplementation, <, Integer_lessThan, Bool, 0x6896fd05)             \
++  V(_IntegerImplementation, <=, Integer_lessEqualThan, Bool, 0x76831143)       \
++  V(_IntegerImplementation, >=, Integer_greaterEqualThan, Bool, 0x2df1a8e3)    \
+   V(_IntegerImplementation, <<, Integer_shl, Dynamic, 0x1050c9a8)              \
+   V(_IntegerImplementation, >>, Integer_sar, Dynamic, 0x39af1c69)              \
+   V(_Double, toInt, DoubleToInteger, Dynamic, 0x26ef344b)
+@@ -459,9 +459,9 @@
+   V(_Bigint, _estQuotientDigit, Bigint_estQuotientDigit, 0x0a2898bb)           \
+   V(_Montgomery, _mulMod, Montgomery_mulMod, 0x26d5b8ee)                       \
+   V(_Double, >, Double_greaterThan, 0x0a202683)                                \
+-  V(_Double, >=, Double_greaterEqualThan, 0x57491a62)                          \
+-  V(_Double, <, Double_lessThan, 0x2e9d61bb)                                   \
+-  V(_Double, <=, Double_lessEqualThan, 0x099e4442)                             \
++  V(_Double, >=, Double_greaterEqualThan, 0x2df1a8e3)                          \
++  V(_Double, <, Double_lessThan, 0x6896fd05)                                   \
++  V(_Double, <=, Double_lessEqualThan, 0x76831143)                             \
+   V(_Double, ==, Double_equal, 0x04c399a1)                                     \
+   V(_Double, +, Double_add, 0x0ea5f450)                                        \
+   V(_Double, -, Double_sub, 0x76768546)                                        \
+@@ -477,9 +477,9 @@
+   V(_IntegerImplementation, ^, Integer_bitXor, 0x47faa8a5)                     \
+   V(_IntegerImplementation, >, Integer_greaterThan, 0x23dd0c00)                \
+   V(_IntegerImplementation, ==, Integer_equal, 0x7d51f04d)                     \
+-  V(_IntegerImplementation, <, Integer_lessThan, 0x2e9d61bb)                   \
+-  V(_IntegerImplementation, <=, Integer_lessEqualThan, 0x099e4442)             \
+-  V(_IntegerImplementation, >=, Integer_greaterEqualThan, 0x57491a62)          \
++  V(_IntegerImplementation, <, Integer_lessThan, 0x6896fd05)                   \
++  V(_IntegerImplementation, <=, Integer_lessEqualThan, 0x76831143)             \
++  V(_IntegerImplementation, >=, Integer_greaterEqualThan, 0x2df1a8e3)          \
+   V(_IntegerImplementation, <<, Integer_shl, 0x1050c9a8)                       \
+   V(_IntegerImplementation, >>, Integer_sar, 0x39af1c69)                       \
+ 
