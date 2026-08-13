@@ -382,3 +382,102 @@
    longjmp(environment_, value);
    UNREACHABLE();
  }
+--- a/runtime/vm/profiler.cc
++++ b/runtime/vm/profiler.cc
+@@ -970,6 +970,59 @@
+ }
+ 
+ 
++#if defined(HOST_OS_WINDOWS) &&                                                \
++    (defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64))
++// WINDARTARM: Windows unwinds from .pdata/.xdata, NOT from a frame-pointer
++// chain. The compiler is free to place the saved {fp,lr} pair anywhere in a
++// frame, or to omit it, so ProfilerNativeStackWalker's [fp+0]=caller-fp /
++// [fp+1]=return-address walk cannot follow C++ frames here and stops after one
++// -- which is why COPY_FP_REGISTER on this platform has always just returned
++// SP ("we don't have the asm equivalent", vm/globals.h). Measured on arm64 in
++// port-arm64/probes/fp_probe2.cpp: [x29+0] holds a stack address and [x29+1] a
++// return address smeared with garbage in its top 16 bits, while RtlVirtualUnwind
++// reports Fp UNCHANGED across three successive frames.
++//
++// So ask the OS. RtlVirtualUnwind is used rather than
++// RtlCaptureStackBackTrace because it can be seeded from a caught CONTEXT,
++// which is what the embedder's Dart_DumpNativeStackTrace hands us.
++static void DumpNativeStackTraceWindows(CONTEXT* seed) {
++  CONTEXT ctx;
++  if (seed != NULL) {
++    ctx = *seed;
++  } else {
++    RtlCaptureContext(&ctx);
++  }
++
++  const intptr_t kMaxNativeFrames = 64;
++  for (intptr_t i = 0; i < kMaxNativeFrames; i++) {
++#if defined(HOST_ARCH_ARM64)
++    const uword pc = static_cast<uword>(ctx.Pc);
++#else
++    const uword pc = static_cast<uword>(ctx.Rip);
++#endif
++    if (pc == 0) {
++      return;
++    }
++    DumpStackFrame(i, pc);
++
++    DWORD64 image_base = 0;
++    PRUNTIME_FUNCTION function_entry =
++        RtlLookupFunctionEntry(pc, &image_base, NULL);
++    if (function_entry == NULL) {
++      // No unwind record: JIT-generated code (Dart emits no .pdata) or a leaf
++      // we cannot step over. Stop rather than guess.
++      OS::PrintErr("  ...no unwind info at this frame; stack may continue\n");
++      return;
++    }
++    PVOID handler_data = NULL;
++    DWORD64 establisher_frame = 0;
++    RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, pc, function_entry, &ctx,
++                     &handler_data, &establisher_frame, NULL);
++  }
++}
++#endif  // HOST_OS_WINDOWS && (X64 || ARM64)
++
++
+ void Profiler::DumpStackTrace(void* context) {
+ #if defined(HOST_OS_LINUX) || defined(HOST_OS_MACOS)
+   ucontext_t* ucontext = reinterpret_cast<ucontext_t*>(context);
+@@ -978,6 +1031,17 @@
+   uword fp = SignalHandler::GetFramePointer(mcontext);
+   uword sp = SignalHandler::GetCStackPointer(mcontext);
+   DumpStackTrace(sp, fp, pc, true /* for_crash */);
++#elif defined(HOST_OS_WINDOWS) &&                                              \
++    (defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64))
++  // WINDARTARM: a Windows structured-exception handler hands us a real CONTEXT;
++  // unwind from it. (This was a no-op on Windows before.)
++  OSThread* os_thread = OSThread::Current();
++  OS::PrintErr("Dumping native stack trace for thread %" Px "\n",
++               os_thread == NULL
++                   ? 0
++                   : OSThread::ThreadIdToIntPtr(os_thread->trace_id()));
++  DumpNativeStackTraceWindows(reinterpret_cast<CONTEXT*>(context));
++  OS::PrintErr("-- End of DumpStackTrace\n");
+ #else
+ // TODO(fschneider): Add support for more platforms.
+ // Do nothing on unsupported platforms.
+@@ -1021,6 +1085,18 @@
+   OS::PrintErr("Dumping native stack trace for thread %" Px "\n",
+                OSThread::ThreadIdToIntPtr(os_thread->trace_id()));
+ 
++#if defined(HOST_OS_WINDOWS) &&                                                \
++    (defined(HOST_ARCH_X64) || defined(HOST_ARCH_ARM64))
++  // WINDARTARM: the frame-pointer walk below cannot follow C++ frames on
++  // Windows (see DumpNativeStackTraceWindows) -- with fp = SP it appends the
++  // starting pc, fails ValidFramePointer or the step check, and stops, printing
++  // the same line twice. Use the OS unwinder instead; it walks the real C++
++  // stack and stops cleanly where JIT code begins.
++  DumpNativeStackTraceWindows(NULL);
++  OS::PrintErr("-- End of DumpStackTrace\n");
++  return;
++#endif
++
+   uword stack_lower = 0;
+   uword stack_upper = 0;
+ 

@@ -236,9 +236,16 @@ via winget, 2026-08-12):
   address-ordered unwind. Note neither blanket `longjmp` policy is right —
   SEH unwinds in the syntax-error path but not the compile path — so any fix
   must be validated against BOTH `syntax_recover.dart` and `reload_churn.dart`.
-- **Restore native crash stacks.** `COPY_FP_REGISTER` on arm64 currently yields
-  SP, not FP (patch hunk #2 takes the x64 fallback), so `DumpStackTrace` walks
-  one frame. Needs an `armasm64` helper to read x29.
+- ~~**Restore native crash stacks.** `COPY_FP_REGISTER` on arm64 currently
+  yields SP, not FP (patch hunk #2 takes the x64 fallback), so `DumpStackTrace`
+  walks one frame. Needs an `armasm64` helper to read x29.~~
+  **DONE — and the stated approach was wrong.** There is no x29 chain to read:
+  Windows unwinds from `.pdata`, so MSVC may put the saved `{x29,x30}` pair
+  anywhere in a frame or omit it, and no `COPY_FP_REGISTER` value can make the
+  frame-pointer walk follow C++ frames (which is why upstream's x64 branch also
+  just returns SP). Fixed by unwinding with `RtlVirtualUnwind` instead — 17
+  symbolized frames where there were 2, on **both** architectures. Measured in
+  `port-arm64/probes/fp_probe{,2}.cpp`; written up in `port-arm64/AS7_NOTES.md`.
 
 **Goal:** durability and the loose ends. **Exit:** a multi-hour morph/reload
 soak (TCL-driven) runs clean; the VM-tab profiler shows sane Dart stacks
