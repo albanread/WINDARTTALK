@@ -15,6 +15,7 @@
 #include <richedit.h>     // MSFTEDIT_CLASS (the code editor, S7.2)
 
 #include <cstdint>
+#include <map>
 #include <string>
 
 #include "include/dart_api.h"
@@ -79,6 +80,56 @@ static bool MapBool(Dart_Handle map, const char* key) {
   bool b = false;
   if (v != nullptr && Dart_IsBoolean(v)) Dart_BooleanValue(v, &b);
   return b;
+}
+
+// ── the UI font ─────────────────────────────────────────────────────────────
+// Every control used to be fonted with GetStockObject(DEFAULT_GUI_FONT). That
+// is a LEGACY stock font — MS Sans Serif / Tahoma at a fixed ~8pt — which is
+// neither the system UI font (Segoe UI) nor DPI-scaled. dartui is manifested
+// PerMonitorV2 and calls SetProcessDpiAwarenessContext, so on a scaled display
+// the window grew while the control text did not: the browser lists rendered
+// tiny and dated next to the toolbar, which had always built its own Segoe UI.
+//
+// Take the real thing instead: SPI_GETNONCLIENTMETRICS' lfMessageFont is the
+// user's chosen UI font at their chosen size, and asking for it with the
+// window's own DPI (SystemParametersInfoForDpi) returns it already scaled.
+// Cached per DPI, because a window can move between monitors.
+static HFONT UiFont(HWND hwnd) {
+  UINT dpi = 96;
+  if (hwnd != nullptr) {
+    const UINT d = GetDpiForWindow(hwnd);
+    if (d != 0) dpi = d;
+  }
+  static std::map<UINT, HFONT> cache;
+  auto it = cache.find(dpi);
+  if (it != cache.end()) return it->second;
+
+  NONCLIENTMETRICSW ncm = {0};
+  ncm.cbSize = sizeof(ncm);
+  HFONT f = nullptr;
+  if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0,
+                                 dpi)) {
+    f = CreateFontIndirectW(&ncm.lfMessageFont);
+  }
+  if (f == nullptr) {  // last resort; still better than DEFAULT_GUI_FONT
+    f = CreateFontW(-MulDiv(9, dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, FF_DONTCARE, L"Segoe UI");
+  }
+  cache[dpi] = f;
+  return f;
+}
+
+// The UI font's line height for this window, in pixels at its DPI.
+static int UiLineHeight(HWND hwnd) {
+  HDC dc = GetDC(hwnd);
+  if (dc == nullptr) return 20;
+  HFONT prev = static_cast<HFONT>(SelectObject(dc, UiFont(hwnd)));
+  TEXTMETRICW tm = {0};
+  const BOOL ok = GetTextMetricsW(dc, &tm);
+  SelectObject(dc, prev);
+  ReleaseDC(hwnd, dc);
+  return ok ? static_cast<int>(tm.tmHeight) : 20;
 }
 
 // ── kind parsing ────────────────────────────────────────────────────────────
@@ -393,8 +444,7 @@ static std::string MaterializeAdd(ViewServer* vs, Surface* s,
                            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(ticket)),
                            GetModuleHandleW(nullptr), nullptr);
   if (!h) return "CreateWindowExW failed for id=" + id;
-  SendMessageW(h, WM_SETFONT,
-               reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+  SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(UiFont(parent)), TRUE);
 
   // ── kind-specific post-create setup ───────────────────────────────────────
   if (wk == WidgetKind::kList) {
@@ -491,7 +541,20 @@ static void DoPlace(Surface* s, const std::string& id, Dart_Handle frame) {
   auto at = [&](int i) -> int {
     return (i < 4) ? (int)DartInt(Dart_ListGetAt(frame, i)) : 0;
   };
-  MoveWindow(w->hwnd, at(0), at(1), at(2), at(3), TRUE);
+  int h = at(3);
+  // A caption must never be clipped by the app's layout arithmetic. The Dart
+  // side lays out in fixed pixels (workspace.dart's frames carry heights like
+  // 18 chosen against the old DEFAULT_GUI_FONT); the SHELL is the only side
+  // that knows what the real UI font measures at this window's DPI, so it
+  // enforces the floor. Text widgets only — lists, canvases and panes mean
+  // exactly the height they ask for.
+  if (w->kind == WidgetKind::kLabel || w->kind == WidgetKind::kButton ||
+      w->kind == WidgetKind::kCheckbox || w->kind == WidgetKind::kRadio ||
+      w->kind == WidgetKind::kField) {
+    const int need = UiLineHeight(w->hwnd) + 4;  // +4: breathing room
+    if (h < need) h = need;
+  }
+  MoveWindow(w->hwnd, at(0), at(1), at(2), h, TRUE);
 }
 
 static void DoSet(Surface* s, const std::string& id, Dart_Handle props) {
