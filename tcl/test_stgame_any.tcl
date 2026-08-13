@@ -1,11 +1,10 @@
 # WINDARTARM — run a NAMED Smalltalk game and capture it.
 #
-# test_c5_game.tcl hardcodes MandelZoom, which is one of the two `'direct': true`
-# games (language.dart:408,410). Direct-framebuffer mode is deferred on this port
-# (Win_gpBackbuffer returns null, S6b), so stGpDirectBlit silently no-ops and the
-# pane stays black — nothing to do with the ST wiring. This variant lets an
-# INDEXED game be picked instead, which is what actually exercises the stGp*
-# path end to end.
+# Written when direct-framebuffer mode was still deferred and test_c5_game.tcl's
+# hardcoded MandelZoom could only capture black. Win_gpBackbuffer is implemented
+# now (UMA Tier 2), so BOTH kinds work here: indexed games (Galaxigans) exercise
+# the stGp* draw path, and `'direct': true` games (MandelZoom, MandelVM —
+# language.dart:408,410) exercise directBlit into the mapped backbuffer.
 #
 #   tclsh test_stgame_any.tcl ?ws-url? ?GameName?
 source [file join [file dirname [info script]] dartui.tcl]
