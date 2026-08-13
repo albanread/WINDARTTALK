@@ -132,7 +132,24 @@ include_directories(${RT} ${RT}/include ${DC} ${RT}/third_party
 #                    conformance pass (see S1_NOTES.md).
 # /FI msvc_compat.h: force-include the owned compat shim ahead of every TU.
 # CMake already supplies /EHsc /GR /W3 /DWIN32 /D_WINDOWS for MSVC CXX.
+# Exceptions OFF, matching upstream Dart's own posture (build/config/compiler:
+# Dart compiles exceptions-off on every platform). We had been inheriting
+# CMake's default /EHsc without choosing it, and that is not a cosmetic
+# difference: with C++ EH enabled, MSVC registers _CxxFrameHandler3 for these
+# frames, so longjmp() performs a full SEH unwind that runs C++ destructors --
+# including ~StackResource. Dart, however, manages that chain ITSELF
+# (LongJumpScope::Jump -> StackResource::UnwindAbove). Two unwinders for one
+# chain is the AS3/AS7 `allocation.cc:37 top == this` abort: on arm64 the SEH
+# unwind reaches ~LongJumpScope with the chain already moved out from under it.
+# Turning EH off makes longjmp a plain register restore, leaving Dart's manual
+# unwind as the single mechanism -- exactly as on POSIX. See AS7_NOTES.md.
+string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+string(REPLACE "/EHsc" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+
 add_compile_options(
+  /EHs-c-           # no C++ unwind tables; longjmp must not run destructors
+  /D_HAS_EXCEPTIONS=0
   /bigobj
   /Zc:__cplusplus
   /permissive

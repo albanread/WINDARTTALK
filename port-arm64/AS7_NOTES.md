@@ -89,9 +89,117 @@ Notes:
 - `COPY_FP_REGISTER` is left as it is. It is now unused by the crash path, and
   the x64 fallback it takes is as correct as anything else available.
 
-**Reproducing the trigger.** Corrupt a fingerprint in
+### Reproducing the trigger
+
+Corrupt a fingerprint in
 `tree/runtime/vm/method_recognizer.h` (e.g. `0x6896fd05` → `0xdeadbeef`) and
 build; `gen_snapshot` asserts during `Object::Init`. Restore afterwards — and
 **touch the file** (`(Get-Item x).LastWriteTime = Get-Date`), because
 `Move-Item` restores the original mtime and ninja will then skip the rebuild
 and leave you with a poisoned object file.
+
+---
+
+## 2. The StackResource inversion — FIXED (and it was never arm64's fault)
+
+The bug carried in from AS3: with **background compilation** + an aggressive
+optimisation threshold + genuinely-changed hot reloads, the VM aborted at
+`allocation.cc:37 error: expected: top == this`, deterministically at round 7.
+arm64 only; x64 from the same tree passed.
+
+### What the working crash stacks showed immediately
+
+With §1 landed, the first re-run named the whole path — the thing two sprints
+of guessing had not:
+
+```
+  dart::LongJumpScope::~LongJumpScope
+  `dart::CallSiteInliner::TryInlining'::`1'::dtor$0     <- SEH destructor funclet
+  ... _CxxFrameHandler3 / RtlUnwindEx / local_unwind ...
+  longjmp
+  dart::LongJumpScope::Jump
+  dart::CallSiteInliner::TryInlining
+  dart::FlowGraphInliner::Inline
+  dart::CompileParsedFunctionHelper::Compile
+  dart::BackgroundCompiler::Run                         <- background thread
+```
+
+Two facts fall straight out. It is the **background compiler thread**, not the
+mutator (the AS3 notes had inferred the mutator from a `LongJump::Jump` print).
+And the assert fires *inside a `longjmp`-driven SEH unwind* — `_CxxFrameHandler3`
+is running C++ destructor funclets.
+
+### What was ruled out, with evidence
+
+- **Cross-thread contamination.** `~StackResource` already carries a DEBUG
+  `ASSERT(Thread::Current() == thread_)`, and it does not fire. One thread, one
+  chain.
+- **Accumulated stranded resources from earlier jumps.** A temporary probe in
+  `Jump()` walked the live chain looking for its own `top_`: it was **always
+  reachable at depth 0** — nothing to unwind, chain clean. So the corruption
+  happens *during* the unwind, not before it. This also kills the AS3 working
+  hypothesis (arm64's dual stack pointer making StackResource addresses
+  non-monotonic): the addresses are fine at `Jump` time.
+
+### Root cause: two unwinders for one chain
+
+Dart manages the StackResource chain **itself** — `LongJumpScope::Jump` calls
+`StackResource::UnwindAbove`, then `longjmp`. That design assumes `longjmp` is
+a plain register restore, which is true everywhere Dart ships, because
+**upstream Dart compiles with exceptions OFF**.
+
+This port did not. `port-win/CMakeLists.txt` was inheriting **CMake's default
+`/EHsc`** — never a decision, just a default nobody had cause to question (the
+file even remarks on the consequence: *"Absent from Dart's own list only because
+Dart compiled exceptions-OFF; our /EHsc (exceptions-on) posture surfaces it"*).
+With C++ EH on, MSVC registers `_CxxFrameHandler3` for these frames, so
+`longjmp` performs a **full SEH unwind that runs C++ destructors** — a second
+unwinder, walking the same chain Dart is already walking by hand.
+
+That is why neither previous setting worked, and why the notes recorded both as
+failures. Keep the manual unwind and both run: double-destruct, and
+`syntax_recover` aborts. Suppress it for MSVC (what the tree did) and the SEH
+unwind becomes the only mechanism — but it reaches `~LongJumpScope` with the
+chain already changed underneath it, which is the round-7 abort. There was no
+correct answer available while both unwinders existed.
+
+x64 survived only by luck of frame layout and funclet ordering; the hazard was
+identical.
+
+### The fix
+
+Adopt upstream's posture. `port-win/CMakeLists.txt` strips `/EHsc` from the
+CMake defaults and compiles `/EHs-c- /D_HAS_EXCEPTIONS=0`; `longjump.cc` drops
+the MSVC carve-out so `StackResource::UnwindAbove` runs unconditionally, as on
+POSIX. `longjmp` is now a register restore and Dart's manual unwind is the
+single mechanism. Nothing in the port layer uses C++ exceptions (checked), so
+turning them off costs nothing.
+
+### Verification — both gates, both architectures
+
+The two tests that could never pass together now do:
+
+| test | arm64 | x64 |
+|---|---|---|
+| `reload_churn 40 400 --optimization_counter_threshold=100` | `CHURN_OK` | `CHURN_OK` |
+| `reload_churn 300 400` (same threshold, the AS3 soak load) | `CHURN_OK`, 0 errors, 0 stale | — |
+| `syntax_recover` | `SEH_OK`, 8/8 | `SEH_OK`, 8/8 |
+| `reload_min` | `MIN_OK` | `MIN_OK` |
+| `st_world_run` | green | green |
+
+Also unchanged after the rebuild: `dartui.exe … selftest` exit 0 with 38 PNGs
+(the D3D/COM GUI layer is now exceptions-off too), ST/Dart ratio mean 1.01x,
+and cog-bench (arith 11.7, fib 165.4, sieve 3.8, alloc 113.2, richards 10.9,
+deltablue 26.4).
+
+**`--no_background_compilation` is no longer needed.** The AS3 workaround can be
+retired.
+
+### The lesson worth keeping
+
+The bug was never in arm64 codegen, the dual stack pointer, or the i-cache — the
+three things a porting engineer instinctively suspects. It was a **build flag we
+never chose**, inherited from a tool default, quietly contradicting a design
+assumption made by the code we were porting. Two sprints of inference pointed at
+the CPU; ten minutes of a working stack trace pointed at the truth. Fix your
+diagnostics first.

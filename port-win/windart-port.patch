@@ -362,26 +362,163 @@
  
 --- a/runtime/vm/longjump.cc
 +++ b/runtime/vm/longjump.cc
-@@ -64,7 +64,19 @@
-   thread->set_sticky_error(error);
- 
-   // Destruct all the active StackResource objects.
-+#if defined(_MSC_VER)
-+  // WINDART: on MSVC/x64, longjmp() performs SEH stack unwinding, which itself
-+  // runs the C++ destructors of the StackResource objects between here and the
-+  // matching setjmp (in correct LIFO order). Calling UnwindAbove() as well would
-+  // destruct them TWICE — the SEH unwind then trips ~StackResource's
-+  // `ASSERT(top == this)` (allocation.cc) and ABORTS the VM on ANY scan/parse
-+  // error while loading a source library (a user typo, a stray BOM, ...), turning
-+  // a normally-recoverable error into a hard crash. There is no non-unwinding
-+  // setjmp on x64 MSVC, so we rely on the SEH unwind alone here and DO NOT unwind
-+  // manually. On POSIX longjmp does not touch dtors, so the manual unwind stands.
+@@ -1,72 +1,84 @@
+-// Copyright (c) 2011, the Dart project authors.  Please see the AUTHORS file
+-// for details. All rights reserved. Use of this source code is governed by a
+-// BSD-style license that can be found in the LICENSE file.
+-
+-#include "vm/longjump.h"
+-
+-#include "include/dart_api.h"
+-
+-#include "vm/dart_api_impl.h"
+-#include "vm/isolate.h"
+-#include "vm/object.h"
+-#include "vm/object_store.h"
+-#include "vm/os.h"
+-#include "vm/simulator.h"
+-
+-namespace dart {
+-
+-jmp_buf* LongJumpScope::Set() {
+-  ASSERT(top_ == NULL);
+-  top_ = Thread::Current()->top_resource();
+-  return &environment_;
+-}
+-
+-
+-bool LongJumpScope::IsSafeToJump() {
+-  // We do not want to jump past Dart frames.  Note that this code
+-  // assumes the stack grows from high to low.
+-  Thread* thread = Thread::Current();
+-  uword jumpbuf_addr = Thread::GetCurrentStackPointer();
+-#if defined(USING_SIMULATOR)
+-  Simulator* sim = Simulator::Current();
+-  // When using simulator, only mutator thread should refer to Simulator
+-  // since there can be only one per isolate.
+-  uword top_exit_frame_info =
+-      thread->IsMutatorThread() ? sim->top_exit_frame_info() : 0;
+-#else
+-  uword top_exit_frame_info = thread->top_exit_frame_info();
+-#endif
+-  if (!thread->IsMutatorThread()) {
+-    // A helper thread does not execute Dart code, so it's safe to jump.
+-    ASSERT(top_exit_frame_info == 0);
+-    return true;
+-  }
+-  return ((top_exit_frame_info == 0) || (jumpbuf_addr < top_exit_frame_info));
+-}
+-
+-
+-void LongJumpScope::Jump(int value, const Error& error) {
+-  // A zero is the default return value from setting up a LongJumpScope
+-  // using Set.
+-  ASSERT(value != 0);
+-  ASSERT(IsSafeToJump());
+-
+-  Thread* thread = Thread::Current();
+-
+-#if defined(DEBUG)
+-#define CHECK_REUSABLE_HANDLE(name)                                            \
+-  ASSERT(!thread->reusable_##name##_handle_scope_active());
+-  REUSABLE_HANDLE_LIST(CHECK_REUSABLE_HANDLE)
+-#undef CHECK_REUSABLE_HANDLE
+-#endif  // defined(DEBUG)
+-
+-  // Remember the error in the sticky error of this isolate.
+-  thread->set_sticky_error(error);
+-
+-  // Destruct all the active StackResource objects.
+-  StackResource::UnwindAbove(thread, top_);
+-  longjmp(environment_, value);
+-  UNREACHABLE();
+-}
+-
+-}  // namespace dart
++// Copyright (c) 2011, the Dart project authors.  Please see the AUTHORS file
++// for details. All rights reserved. Use of this source code is governed by a
++// BSD-style license that can be found in the LICENSE file.
++
++#include "vm/longjump.h"
++
++#include "include/dart_api.h"
++
++#include "vm/dart_api_impl.h"
++#include "vm/isolate.h"
++#include "vm/object.h"
++#include "vm/object_store.h"
++#include "vm/os.h"
++#include "vm/simulator.h"
++
++namespace dart {
++
++jmp_buf* LongJumpScope::Set() {
++  ASSERT(top_ == NULL);
++  top_ = Thread::Current()->top_resource();
++  return &environment_;
++}
++
++
++bool LongJumpScope::IsSafeToJump() {
++  // We do not want to jump past Dart frames.  Note that this code
++  // assumes the stack grows from high to low.
++  Thread* thread = Thread::Current();
++  uword jumpbuf_addr = Thread::GetCurrentStackPointer();
++#if defined(USING_SIMULATOR)
++  Simulator* sim = Simulator::Current();
++  // When using simulator, only mutator thread should refer to Simulator
++  // since there can be only one per isolate.
++  uword top_exit_frame_info =
++      thread->IsMutatorThread() ? sim->top_exit_frame_info() : 0;
 +#else
-   StackResource::UnwindAbove(thread, top_);
++  uword top_exit_frame_info = thread->top_exit_frame_info();
 +#endif
-   longjmp(environment_, value);
-   UNREACHABLE();
- }
++  if (!thread->IsMutatorThread()) {
++    // A helper thread does not execute Dart code, so it's safe to jump.
++    ASSERT(top_exit_frame_info == 0);
++    return true;
++  }
++  return ((top_exit_frame_info == 0) || (jumpbuf_addr < top_exit_frame_info));
++}
++
++
++void LongJumpScope::Jump(int value, const Error& error) {
++  // A zero is the default return value from setting up a LongJumpScope
++  // using Set.
++  ASSERT(value != 0);
++  ASSERT(IsSafeToJump());
++
++  Thread* thread = Thread::Current();
++
++#if defined(DEBUG)
++#define CHECK_REUSABLE_HANDLE(name)                                            \
++  ASSERT(!thread->reusable_##name##_handle_scope_active());
++  REUSABLE_HANDLE_LIST(CHECK_REUSABLE_HANDLE)
++#undef CHECK_REUSABLE_HANDLE
++#endif  // defined(DEBUG)
++
++  // Remember the error in the sticky error of this isolate.
++  thread->set_sticky_error(error);
++
++  // Destruct all the active StackResource objects.
++  //
++  // WINDARTARM: this is now unconditional again, including on MSVC. The earlier
++  // MSVC carve-out existed because the port was building with CMake's default
++  // /EHsc: with C++ EH on, longjmp() performs an SEH unwind that ALSO runs these
++  // destructors, so doing both destructed them twice and tripped
++  // ~StackResource's `ASSERT(top == this)` on any recoverable scan/parse error.
++  // The real fix was upstream's own posture -- compile exceptions OFF (see
++  // port-win/CMakeLists.txt) -- which makes longjmp a plain register restore and
++  // leaves this manual unwind as the single mechanism, exactly as on POSIX.
++  // Suppressing the manual unwind instead only moved the failure: on arm64 the
++  // SEH unwind reached ~LongJumpScope with the chain already changed underneath
++  // it (AS7_NOTES.md).
++  StackResource::UnwindAbove(thread, top_);
++  longjmp(environment_, value);
++  UNREACHABLE();
++}
++
++}  // namespace dart
 --- a/runtime/vm/profiler.cc
 +++ b/runtime/vm/profiler.cc
 @@ -970,6 +970,59 @@

@@ -40,6 +40,16 @@ UnwindAbove`, let SEH unwind) remains correct on arm64 — **no arm64 change**.
 Independently confirmed with a standalone probe: MSVC's `longjmp` **does** run
 C++ destructors on arm64, same as x64.
 
+> **RESOLVED in AS7 (see `AS7_NOTES.md` §2) — and the diagnosis below is wrong.**
+> It is not arm64-specific and has nothing to do with the dual stack pointer.
+> The port was inheriting CMake's default `/EHsc`, so `longjmp` performed an SEH
+> unwind that ran C++ destructors — a second unwinder competing with Dart's own
+> `StackResource::UnwindAbove`. Compiling exceptions-off (upstream Dart's own
+> posture) and restoring the unconditional manual unwind fixes it on both
+> architectures. The evidence gathered below is sound; the conclusion drawn
+> from it was not. Kept as written, because how it looked from inside is the
+> useful part.
+
 ## 3. BUG (arm64-specific): `allocation.cc` StackResource assert under
 ##    background compilation + aggressive optimisation + hot-reload
 

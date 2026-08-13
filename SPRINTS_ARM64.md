@@ -229,13 +229,24 @@ and plays (headless + live); world export/import round-trips; the
 ## AS7 — Soak, profiler truth, packaging (+ the AS3 bug, + optional real FFI)
 **Carried in from AS3** (WinDbg for arm64 is now **installed** — `WinDbgX.exe`
 via winget, 2026-08-12):
-- **Root-cause the StackResource inversion.** Repro in `AS3_NOTES.md` §3.
+- ~~**Root-cause the StackResource inversion.** Repro in `AS3_NOTES.md` §3.
   Hypothesis to test: arm64's dual stack pointer (`CSP = (SP−4096) & ~15` per
   `Assembler::EnterFrame`) makes C++ StackResource addresses non-monotonic
   across runtime entries taken at different Dart depths, breaking the
-  address-ordered unwind. Note neither blanket `longjmp` policy is right —
-  SEH unwinds in the syntax-error path but not the compile path — so any fix
-  must be validated against BOTH `syntax_recover.dart` and `reload_churn.dart`.
+  address-ordered unwind.~~
+  **DONE — and it was never arm64's fault.** Not the dual stack pointer, not
+  codegen, not the i-cache: the port was inheriting CMake's default **`/EHsc`**
+  (exceptions ON), which upstream Dart never uses. With C++ EH on, `longjmp`
+  performs an SEH unwind that runs C++ destructors — a *second* unwinder
+  walking the same StackResource chain `LongJumpScope::Jump` already unwinds by
+  hand. That is why neither blanket policy worked: both on = double-destruct
+  (`syntax_recover` aborts); manual off = the SEH unwind reaches
+  `~LongJumpScope` with the chain moved underneath it (`reload_churn` aborts at
+  round 7). Fixed by adopting upstream's posture — `/EHs-c- /D_HAS_EXCEPTIONS=0`
+  plus an unconditional `UnwindAbove`. **Both** gates now pass on **both**
+  architectures, `--no_background_compilation` is no longer needed, and the
+  latent hazard on x64 is gone too. Written up in `port-arm64/AS7_NOTES.md` §2.
+  The working crash stacks from §1 found it in minutes.
 - ~~**Restore native crash stacks.** `COPY_FP_REGISTER` on arm64 currently
   yields SP, not FP (patch hunk #2 takes the x64 fallback), so `DumpStackTrace`
   walks one frame. Needs an `armasm64` helper to read x29.~~
